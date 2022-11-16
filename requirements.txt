@@ -1,0 +1,5 @@
+setuptools == 59.5.0
+lightningflower == 0.1.8
+lightningdata-modules == 0.1.4
+torchmetrics == 0.10.2
+

@@ -1,5 +1,6 @@
 from lightningflower.utility import boolean_string
-
+import torch
+import sys
 
 class Defaults(object):
     # client learning attributes
@@ -16,6 +17,13 @@ class Defaults(object):
     CLIENT_LR = 0.1
     # digit5 dataset defaults
     IMG_SIZE_OFFICE_HOME = 256
+
+
+def signal_handler_free_cuda(sig, frame):
+    # clear cuda cache
+    torch.cuda.empty_cache()
+    print('You pressed Ctrl+C! Free CUDA and exit')
+    sys.exit(0)
 
 
 def add_project_specific_args(parent_parser):

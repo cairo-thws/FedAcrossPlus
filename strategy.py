@@ -13,13 +13,9 @@ from lightningflower.strategy import LightningFlowerBaseStrategy
 from lightningflower.utility import boolean_string
 from pytorch_lightning import Trainer
 
-# project impoprts
-from common import Defaults
-#from models import FedShotPlusPlusPhase, phase_to_str
 
-
-class FedShotPlusPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
-    """Configurable FedShot++ strategy implementation."""
+class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
+    """Configurable ProtoFewShotPlus strategy implementation."""
 
     # pylint: disable=too-many-arguments,too-many-instance-attributes
     def __init__(self,
@@ -30,42 +26,37 @@ class FedShotPlusPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
                  min_available_clients,
                  accept_failures,
                  server_model,
-                 source_data,
                  server_trainer_args=None,
                  eval_fn=None
                  ) -> None:
 
         FedAvg.__init__(self,
                         fraction_fit=fraction_fit,
-                        fraction_eval=fraction_eval,
+                        fraction_evaluate=fraction_eval,
                         min_fit_clients=min_fit_clients,
-                        min_eval_clients=min_eval_clients,
+                        min_evaluate_clients=min_eval_clients,
                         min_available_clients=min_available_clients,
                         accept_failures=accept_failures,
-                        eval_fn=eval_fn
+                        evaluate_fn=eval_fn
                         )
         # init base strategy
         LightningFlowerBaseStrategy.__init__(self)
 
         # set the config func
-        self.on_fit_config_fn = FedShotPlusPlusStrategy.fit_round
+        self.on_fit_config_fn = ProtoFewShotPlusStrategy.fit_round
 
-        self.source_data = source_data
         self.server_trainer_args = server_trainer_args
         self.server_model = server_model
 
         # initial parameter from source model
         self.initial_parameters = self.server_model.get_initial_params()
 
-        # set internal model mode to server
-        #self.server_model.model.mode = "server"
-
-        print("Init FedShotPlusPlus Strategy")
+        print("[STRATEGY] Init ProtoFewShotPlus Strategy")
 
     @staticmethod
     def add_strategy_specific_args(parent_parser):
         # add base LightningFlowerFedAvgStrategy argument group
-        parser = parent_parser.add_argument_group("FedShotPlusPlusStrategy")
+        parser = parent_parser.add_argument_group("ProtoFewShotPlusStrategy")
         # FedAvg specific arguments
         parser.add_argument("--fraction_fit", type=float, default=0.5)
         parser.add_argument("--fraction_eval", type=float, default=0.5)
@@ -108,6 +99,7 @@ class FedShotPlusPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
             failures: List[BaseException],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         """Aggregate fit results using weighted average."""
+        print("[STRATEGY] Aggregate_fit called")
         if not results:
             return None, {}
         # Do not aggregate if there are failures and failures are not accepted

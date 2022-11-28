@@ -1,11 +1,15 @@
+import gc
 import os
+import signal
+import torch
+
 from argparse import ArgumentParser
 
 # TorchVision
 import pytorch_lightning
 
 # Flower framework
-from flwr.server import start_server
+from flwr.server import start_server, ServerConfig
 #from flwr.common import weights_to_parameters
 
 # Pytorch/ Lightning
@@ -23,9 +27,11 @@ from lightningflower.data import LightningFlowerData
 from lightningdata.modules.domain_adaptation.office31_datamodule import Office31DataModule
 
 # project imports
-from strategy import FedShotPlusPlusStrategy
-from common import add_project_specific_args, Defaults
-from models import ServerModel
+from torch.utils.data import Subset, DataLoader
+
+from strategy import ProtoFewShotPlusStrategy
+from common import add_project_specific_args, signal_handler_free_cuda, Defaults
+from models import ServerDataModel
 
 """
 If you get an error like: “failed to connect to all addresses” “grpc_status”:14 
@@ -37,9 +43,17 @@ if os.environ.get("http_proxy"):
     del os.environ["http_proxy"]
 
 
+"""
+Capture KB interrupt and free cuda memory
+"""
+signal.signal(signal.SIGINT, signal_handler_free_cuda)
+
+
 class LightningFlowerServerModel(LightningFlowerModel):
-    def __init__(self, model, name="", strict_params=False):
+    def __init__(self, model, prototypes, prototype_classes, name="", strict_params=False):
         super().__init__(model=model, name=name, strict_params=strict_params)
+        self.source_prototypes = prototypes
+        self.source_classes = prototype_classes
 
     def get_initial_params(self):
         print("[SERVER] Providing initial server params to strategy")
@@ -57,18 +71,59 @@ class LightningFlowerServerModel(LightningFlowerModel):
         return None#weights_to_parameters(weights)
 
 
-def pre_train_server_model(model, datamodule, trainer_args):
+def create_class_prototypes(model, data_loader: DataLoader):
+    # subsets = {target: Subset(train_set, [i for i, (x, y) in enumerate(train_set) if y == target]) for _, target in
+    # train_set.class_to_idx.items()}
+    print("[MODEL] Creating class prototypes, please wait ...")
+    with torch.no_grad():
+        model.eval()
+        class_protos = []
+        # for i in range(train_set.num_classes):
+        for i in range(len(data_loader.dataset.dataset.classes)):
+            # idx_subset = train_set.labels_to_idx[i]
+            idx_subset = [j for j, (_, y) in enumerate(data_loader.dataset) if y == i]
+            subset = Subset(data_loader.dataset, idx_subset)
+            dataloader = DataLoader(subset, batch_size=len(idx_subset))
+            for data, labels in dataloader:
+                data = data.to(DEVICE)
+                _, preds = model(data)
+                class_protos.append(torch.mean(preds, dim=0))
+        class_prototypes = torch.stack(class_protos, 0)
+    print("[MODEL] Finished creating class prototypes.")
+    return class_prototypes.detach().clone()
+
+
+def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=False):
     # Init ModelCheckpoint callback, monitoring "val_loss"
     checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True)
-    early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.01, patience=2, verbose=True, mode="max")
+    early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.01, patience=3, verbose=True, mode="min")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
-    static_ckpt_path = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + ".ckpt")
+    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + ".pt")
+    static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_protos.pt")
     checkpoint_path = trainer_args.ckpt_path if trainer_args.ckpt_path != "" else None
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=checkpoint_path)
-    # update mode and phase after pre-training
-    trainer.save_checkpoint(static_ckpt_path)
+    # update current model
+    if checkpoint_callback.best_model_path != "":
+        # obtain the best model from checkpoint
+        best_model_pl = ServerDataModel.load_from_checkpoint(checkpoint_callback.best_model_path, map_location=DEVICE)
+        best_model = best_model_pl.model.to(DEVICE)
+        if create_prototypes:
+            best_model_prototypes = create_class_prototypes(best_model, datamodule.train_dataloader())
+        # save to disk
+        torch.save(best_model_pl, static_pt_path_model)
+        torch.save(best_model_prototypes, static_pt_path_protos)
+        return best_model_pl, best_model_prototypes
     # trainer.validate(model=model, datamodule=datamodule)
+    return None, None
+
+
+def evaluate_server_model(model, datamodule, trainer_args):
+    trainer = Trainer.from_argparse_args(trainer_args,
+                                         deterministic=True,
+                                         logger=False,
+                                         enable_checkpointing=False)
+    trainer.test(model=model, datamodule=datamodule, verbose=True)
 
 
 def get_source_train_augmentation():
@@ -92,7 +147,7 @@ def main() -> None:
     # server side evaluation training configuration
     parser = Trainer.add_argparse_args(parser)
     # strategy-specific arguments
-    #parser = FedShotPlusPlusStrategy.add_strategy_specific_args(parser)
+    parser = ProtoFewShotPlusStrategy.add_strategy_specific_args(parser)
     # parse args
     args = parser.parse_args()
 
@@ -115,54 +170,94 @@ def main() -> None:
                         shuffle=True
                         )
 
-    source_model = None
+    best_source_model = None
+    path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
+    model_file_exists = os.path.exists(path_to_file)
+
     # pre-train the model on plain source data
     if args.pretrain:
-        print("[SERVER] Pretrain source model")
-        source_model = ServerModel(name=str(source_dm.get_dataset_name()),
-                                   num_classes=31,
-                                   lr=Defaults.SERVER_LR,
-                                   momentum=Defaults.SERVER_LR_MOMENTUM,
-                                   gamma=Defaults.SERVER_LR_GAMMA,
-                                   weight_decay=Defaults.SERVER_LR_WD,
-                                   epsilon=Defaults.SERVER_LOSS_EPSILON)
-        print(source_model)
-        pre_train_server_model(source_model, source_dm, args)
-        print("[SERVER] Finished model pre-training")
-        return
-    else:
         print("[SERVER] Load and test pretrained source model")
+        source_model = ServerDataModel(name=str(source_dm.get_dataset_name()),
+                                       num_classes=31,
+                                       lr=Defaults.SERVER_LR,
+                                       momentum=Defaults.SERVER_LR_MOMENTUM,
+                                       gamma=Defaults.SERVER_LR_GAMMA,
+                                       weight_decay=Defaults.SERVER_LR_WD,
+                                       epsilon=Defaults.SERVER_LOSS_EPSILON)
 
-        source_model = ServerModel.load_from_checkpoint(
-            checkpoint_path=os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".ckpt"))
+        # move source model to current device
+        source_model = source_model.to(DEVICE)
 
-    """
+        # print model information
+        #print(source_model)
+
+        # start the server-side source training
+        best_source_model, best_source_protos = pre_train_server_model(source_model, source_dm, args, create_prototypes=True)
+        print("[SERVER] Done. Evaluating pretrained model")
+
+        # evaluation
+        evaluate_server_model(best_source_model, source_dm, args)
+        return
+    elif model_file_exists:
+        print("[SERVER] Load and test pretrained source model")
+        #best_source_model = ServerDataModel.load_from_checkpoint(
+            #checkpoint_path=os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".ckpt"))
+        best_source_model = torch.load(os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt"))
+        best_source_protos = torch.load(
+            os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_protos.pt"))
+        # move source model and prototypes to current device
+        best_source_model = best_source_model.to(DEVICE)
+        best_source_protos = best_source_protos.to(DEVICE)
+        # evaluation
+        evaluate_server_model(best_source_model, source_dm, args)
+
     # bring source model into server mode and wrap it into LF
-    lightning_flower_server_model = FedShotPlusPlusServerModel(model=source_model,
-                                                               name=args.model_name,
+    lightning_flower_server_model = LightningFlowerServerModel(model=best_source_model,
+                                                               prototypes=best_source_protos,
+                                                               prototype_classes=source_dm.classes,
+                                                               name=Office31DataModule.get_dataset_name() + "_model",
                                                                strict_params=True)
+    # release memory of source data
+    del source_dm
+    gc.collect()
 
     # STRATEGY CONFIGURATION: pass pretrained model to server
-    strategy = FedShotPlusPlusStrategy.from_argparse_args(args,
-                                                          server_model=lightning_flower_server_model,
-                                                          source_data=source_dm,
-                                                          server_trainer_args=args)
+    strategy = ProtoFewShotPlusStrategy.from_argparse_args(args,
+                                                           server_model=lightning_flower_server_model,
+                                                           server_trainer_args=args)
     # SERVER SETUP
     server = LightningFlowerServer(strategy=strategy)
+
+    # Server config
+    server_config = ServerConfig(num_rounds=args.num_rounds)
 
     try:
         # Start Lightning Flower server for three rounds of federated learning
         start_server(server=server,
                      server_address=args.host_address,
-                     config={"num_rounds": args.num_rounds},
+                     config=server_config,
                      grpc_max_message_length=args.max_msg_size)
     except RuntimeError as err:
         print(repr(err))
-    """
 
 
 if __name__ == "__main__":
+    # available gpu checks
+    global DEVICE
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    if DEVICE == "cuda":
+        # clear the cache of the current device
+        torch.cuda.empty_cache()
+        print("[SERVER] Using CUDA acceleration")
+    else:
+        print("[SERVER] Using CPU acceleration")
+
+    # start and run FL server
     main()
+
+    # clear cuda cache
+    torch.cuda.empty_cache()
+    print("[SERVER] Graceful shutdown")
 
 
 """

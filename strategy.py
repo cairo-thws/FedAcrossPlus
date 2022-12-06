@@ -1,8 +1,9 @@
 import os
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Union
 
 # Flwr
-from flwr.common import Parameters, Scalar, FitRes #, weights_to_parameters, parameters_to_weights, FitIns
+from flwr.common import Parameters, Scalar, FitRes, \
+    EvaluateRes  # , weights_to_parameters, parameters_to_weights, FitIns
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
@@ -26,6 +27,8 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
                  min_available_clients,
                  accept_failures,
                  server_model,
+                 N,
+                 K,
                  server_trainer_args=None,
                  eval_fn=None
                  ) -> None:
@@ -43,7 +46,7 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
         LightningFlowerBaseStrategy.__init__(self)
 
         # set the config func
-        self.on_fit_config_fn = ProtoFewShotPlusStrategy.fit_round
+        self.on_fit_config_fn = self.fit_round
 
         self.server_trainer_args = server_trainer_args
         self.server_model = server_model
@@ -51,12 +54,20 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
         # initial parameter from source model
         self.initial_parameters = self.server_model.get_initial_params()
 
+        # few-shot arguments
+        self.N = N
+        self.K = K
+
         print("[STRATEGY] Init ProtoFewShotPlus Strategy")
 
     @staticmethod
     def add_strategy_specific_args(parent_parser):
         # add base LightningFlowerFedAvgStrategy argument group
         parser = parent_parser.add_argument_group("ProtoFewShotPlusStrategy")
+        # FewShot specific arguments
+        parser.add_argument("--K", type=int, default=7)
+        parser.add_argument("--N", type=int, default=10)
+        parser.add_argument("--episodes", type=int, default=10)
         # FedAvg specific arguments
         parser.add_argument("--fraction_fit", type=float, default=0.5)
         parser.add_argument("--fraction_eval", type=float, default=0.5)
@@ -86,17 +97,24 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
                               detect_anomaly=True)
         return trainer
 
-    @staticmethod
-    def fit_round(rnd: int) -> Dict:
+    def fit_round(self, rnd: int) -> Dict:
         """Sends the current server configuration to the client"""
         print("[STRATEGY] Federated Round " + str(rnd))
-        return {}
+        ret_dict = dict()
+        if rnd == 1:
+            print("[STRATEGY] Sending initial prototype configuration to client - N=" + str(self.N) + ", K=" + str(self.K))
+            ret_dict["source_classes"] = b",".join(self.server_model.get_source_classes()).decode("utf-8")
+            ret_dict["K"] = str(self.K)
+            ret_dict["N"] = str(self.N)
+        ret_dict["global_round"] = str(rnd)
+        ret_dict["training_episodes"] = str(self.server_trainer_args.episodes)
+        return ret_dict
 
     def aggregate_fit(
-            self,
-            rnd: int,
-            results: List[Tuple[ClientProxy, FitRes]],
-            failures: List[BaseException],
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, FitRes]],
+        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         """Aggregate fit results using weighted average."""
         print("[STRATEGY] Aggregate_fit called")
@@ -106,48 +124,30 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
         if not self.accept_failures and failures:
             return None, {}
 
-        """
-        # somehow pas
-        # s parameters to source model
-        print("Server collecting parameters from round " + str(rnd) + " from number of clients=" + str(len(results)))
-        # zero-out local gmms list
-        self.server_model.model.target_gmm.clear()
-        for (client, fit_res) in results:
-            client_id = fit_res.metrics["client_id"]
-            print("Client id= " + str(client_id) + " delivered results to server")
-            client_weights = parameters_to_weights(fit_res.parameters)
-            gmm_params = client_weights[-Defaults.GMM_PARAMS_DIGIT5:]
-            local_classifier_params = client_weights[:-Defaults.CLASSIFIER_PARAMS_DIGIT5]
-            client_gmm = gaussian_mm_from_params(params=gmm_params, warm_start=True)
-            self.server_model.model.target_gmm.append((client_id, client_gmm))
-            LightningFlowerClient.set_model_parameters(model=self.server_model.model.client_classifiers[client_id],
-                                                       parameters=local_classifier_params,
-                                                       strict=True)
-
-        # sort by client ids
-        self.server_model.model.target_gmm.sort(key=lambda tup: tup[0])
-        # freeze the client classifiers
-        # self.server_model.model.freeze_client_classifiers(True)
-
-        # create new trainer instance
-        trainer = self.create_trainer_instance()
-
-        # train source model in server mode
-        trainer.fit(model=self.server_model.model,
-                    datamodule=self.source_data)
-
-        # save a model checkpoint with newly updated weights
-        cp_path = os.path.join("data", "full", str(self.source_data.get_dataset_name()) + ".ckpt")
-        trainer.save_checkpoint(cp_path)
-
-        # extract updated global model weights
-        new_weights = self.server_model.get_flwr_params() 
+        print("[STRATEGY] Server collecting parameters from round " + str(server_round) + " from number of clients=" + str(len(results)))
 
         for (client, fit_res) in results:
             client_id = fit_res.metrics["client_id"]
             duration = fit_res.metrics["duration"]
-            phase = fit_res.metrics["phase"]
-            print("[STRATEGY] Client " + str(client_id) + " returned result from phase " + phase_to_str(phase) + " with duration " + str(duration))
-        """
+            status = fit_res.status
+            print("[STRATEGY] Client " + str(client_id) + " returned result message= " + status.message + " with duration " + str(duration))
 
+        return None, {}
+
+    def aggregate_evaluate(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, EvaluateRes]],
+        failures: List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]],
+    ) -> Tuple[Optional[float], Dict[str, Scalar]]:
+        """Aggregate evaluation losses using weighted average."""
+        print("[STRATEGY] Server evaluate on query set in round " + str(
+            server_round) + " from number of clients=" + str(len(results)))
+
+        for (client, eval_res) in results:
+            client_id = eval_res.metrics["client_id"]
+            duration = eval_res.metrics["duration"]
+            accuracy = eval_res.metrics["accuracy"]
+            status = eval_res.status
+            print("[STRATEGY] Client " + str(client_id) + " returned result message= " + status.message + " with duration " + str(duration) + " and eval accuracy=" + accuracy)
         return None, {}

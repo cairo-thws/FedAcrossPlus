@@ -1,5 +1,6 @@
 from typing import Tuple, Optional, List, Dict
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 
 
@@ -69,7 +70,8 @@ class Classifier(nn.Module):
         f = f.view(-1, self.backbone.out_features)
         f = self.bottleneck(f)
         predictions = self.head(f)
-        return f, predictions
+        logits = F.log_softmax(predictions, dim=1)
+        return f, logits
 
     def get_parameters(self, target_adaptation=False) -> List[Dict]:
         """A parameter list which decides optimization hyper-parameters,

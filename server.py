@@ -1,5 +1,6 @@
 import gc
 import os
+import random
 import signal
 import torch
 
@@ -10,7 +11,7 @@ import pytorch_lightning
 
 # Flower framework
 from flwr.server import start_server, ServerConfig
-#from flwr.common import weights_to_parameters
+from flwr.common import ndarrays_to_parameters
 
 # Pytorch/ Lightning
 from pytorch_lightning import Trainer
@@ -29,8 +30,9 @@ from lightningdata.modules.domain_adaptation.office31_datamodule import Office31
 # project imports
 from torch.utils.data import Subset, DataLoader
 
+import common
 from strategy import ProtoFewShotPlusStrategy
-from common import add_project_specific_args, signal_handler_free_cuda, Defaults
+from common import add_project_specific_args, signal_handler_free_cuda, Defaults, test_prototypes
 from models import ServerDataModel
 
 """
@@ -52,12 +54,20 @@ signal.signal(signal.SIGINT, signal_handler_free_cuda)
 class LightningFlowerServerModel(LightningFlowerModel):
     def __init__(self, model, prototypes, prototype_classes, name="", strict_params=False):
         super().__init__(model=model, name=name, strict_params=strict_params)
+        # convert tensor to ndarray
         self.source_prototypes = prototypes
         self.source_classes = prototype_classes
 
+    def get_source_classes(self):
+        return self.source_classes
+
     def get_initial_params(self):
         print("[SERVER] Providing initial server params to strategy")
-        return self.get_flwr_params()
+        return ndarrays_to_parameters(self.get_prototypes().cpu().detach().numpy())
+
+    def get_prototypes(self):
+        print("[SERVER] Providing converted ndarray protos to strategy")
+        return self.source_prototypes.clone()
 
     def get_flwr_params(self):
         # get the weights
@@ -86,8 +96,8 @@ def create_class_prototypes(model, data_loader: DataLoader):
             dataloader = DataLoader(subset, batch_size=len(idx_subset))
             for data, labels in dataloader:
                 data = data.to(DEVICE)
-                _, preds = model(data)
-                class_protos.append(torch.mean(preds, dim=0))
+                f, _ = model(data)
+                class_protos.append(torch.mean(f, dim=0))
         class_prototypes = torch.stack(class_protos, 0)
     print("[MODEL] Finished creating class prototypes.")
     return class_prototypes.detach().clone()
@@ -95,7 +105,7 @@ def create_class_prototypes(model, data_loader: DataLoader):
 
 def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=False):
     # Init ModelCheckpoint callback, monitoring "val_loss"
-    checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True)
+    checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True, mode="max")
     early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.01, patience=3, verbose=True, mode="min")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
@@ -134,6 +144,15 @@ def get_source_train_augmentation():
 def get_source_test_augmentation():
     """ Test data augmentation on source data here"""
     pass
+
+
+def evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args):
+    episodic_categories = random.sample(range(0, source_dm.num_classes), args.N)
+    loaders = common.create_fewshot_loaders(source_dm, episodic_categories, args.K)
+    best_source_protos = best_source_protos.to(DEVICE)
+    best_source_model = best_source_model.to(DEVICE)
+    acc = test_prototypes(best_source_model, best_source_protos[episodic_categories], loaders, DEVICE)
+    print("[SERVER] Accuracy of class prototypes on source training data is " + str(acc))
 
 
 def main() -> None:
@@ -197,7 +216,6 @@ def main() -> None:
 
         # evaluation
         evaluate_server_model(best_source_model, source_dm, args)
-        return
     elif model_file_exists:
         print("[SERVER] Load and test pretrained source model")
         #best_source_model = ServerDataModel.load_from_checkpoint(
@@ -210,6 +228,8 @@ def main() -> None:
         best_source_protos = best_source_protos.to(DEVICE)
         # evaluation
         evaluate_server_model(best_source_model, source_dm, args)
+
+    evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args)
 
     # bring source model into server mode and wrap it into LF
     lightning_flower_server_model = LightningFlowerServerModel(model=best_source_model,
@@ -229,7 +249,7 @@ def main() -> None:
     server = LightningFlowerServer(strategy=strategy)
 
     # Server config
-    server_config = ServerConfig(num_rounds=args.num_rounds)
+    server_config = ServerConfig(num_rounds=args.num_rounds, round_timeout=300.0)
 
     try:
         # Start Lightning Flower server for three rounds of federated learning

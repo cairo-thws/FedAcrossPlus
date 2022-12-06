@@ -68,19 +68,25 @@ def lr_scheduler(optimizer, iter_num, max_iter, gamma=10, power=0.75):
 class DataModelBase(pl.LightningModule):
     def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon):
         super().__init__()
-        # make hyperparameter available via self.hparams
+
         self.save_hyperparameters()
+
+    def forward(self, x):
+        return self.model(x)
 
 
 class ServerDataModel(DataModelBase):
     def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon):
         super().__init__(name, num_classes, lr, momentum, gamma, weight_decay, epsilon)
 
+        # make hyperparameter available via self.hparams
+        self.save_hyperparameters()
+
         ## set base network
         backbone = backbones.resnet50(pretrained=True)
 
         # model
-        self.model = classifier.ImageClassifier(backbone=backbone, num_classes=self.hparams.num_classes)
+        self.model = classifier.ImageClassifier(backbone=backbone, num_classes=self.hparams.num_classes, bottleneck_dim=self.hparams.num_classes)
 
         # initialize classifier head
         self.model.head.apply(init_weights)
@@ -105,19 +111,16 @@ class ServerDataModel(DataModelBase):
             #sampleImg = torch.rand((1, 3, 224, 224))
             #self.logger.experiment.add_graph(self, sampleImg)
 
-    def forward(self, x):
-        return self.model(x)
-
     def on_train_start(self):
         """Called at the beginning of training after sanity check."""
         pass
 
     def training_step(self, train_batch, batch_idx):
         data, labels = train_batch
-        _, predictions = self(data)
+        _, logits = self(data)
         classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
                                                   epsilon=self.hparams.epsilon,
-                                                  use_gpu=self.device == "cuda")(predictions, labels)
+                                                  use_gpu=self.device == "cuda")(logits, labels)
         self.log("classifier_loss", classifier_loss)
         lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
                      max_iter=self.trainer.estimated_stepping_batches)
@@ -126,8 +129,8 @@ class ServerDataModel(DataModelBase):
 
     def validation_step(self, train_batch, batch_idx):
         data, labels = train_batch
-        _, predictions = self(data)
-        logits = nn.Softmax(dim=1)(predictions)
+        _, logits = self(data)
+        #logits = nn.Softmax(dim=1)(predictions)
         _, predict = torch.max(logits, 1)
         self.val_acc(predict, labels.squeeze())
         self.log("val_acc", self.val_acc)
@@ -136,8 +139,8 @@ class ServerDataModel(DataModelBase):
 
     def test_step(self, test_batch, batch_idx):
         data, labels = test_batch
-        _, predictions = self(data)
-        logits = nn.Softmax(dim=1)(predictions)
+        _, logits = self(data)
+        #logits = nn.Softmax(dim=1)(predictions)
         _, predict = torch.max(logits, 1)
         self.test_acc(predict, labels.squeeze())
         self.log("test_acc", self.test_acc)
@@ -153,6 +156,28 @@ class ServerDataModel(DataModelBase):
         return optimizer
 
 
-class ClientModel(DataModelBase):
-    def __init__(self):
-        super().__init__()
+class ClientDataModel(DataModelBase):
+    def __init__(self, pretrained_model, args):
+        super().__init__(*args)
+        self.model = pretrained_model
+        self.class_prototypes_source = None
+        self.episodic_prototypes = None
+        self.K = None
+        self.N = None
+        self.save_hyperparameters(ignore=['pretrained_model'])
+
+        # set params learnable/frozen
+        for param in self.model.backbone.parameters():
+            param.requires_grad = False
+        for param in self.model.bottleneck.parameters():
+            param.requires_grad = False
+        for param in self.model.head.parameters():
+            param.requires_grad = True
+
+    def configure_optimizers(self):
+        param_group = self.model.get_parameters(target_adaptation=True)
+        # create optimizer with parameter group
+        optimizer = optim.SGD(params=param_group, lr=self.hparams.lr, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay, nesterov=True)
+        #lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=1, gamma=self.hparams.gamma)
+        optimizer = op_copy(optimizer)
+        return optimizer

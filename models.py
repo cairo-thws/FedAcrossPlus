@@ -68,8 +68,12 @@ def lr_scheduler(optimizer, iter_num, max_iter, gamma=10, power=0.75):
 class DataModelBase(pl.LightningModule):
     def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon):
         super().__init__()
+        # training dataset mean
+        self.training_dataset_mean = None
+        #self.save_hyperparameters()
 
-        self.save_hyperparameters()
+    def set_training_dataset_mean(self, mean_tensor):
+        self.training_dataset_mean = mean_tensor
 
     def forward(self, x):
         return self.model(x)
@@ -117,10 +121,11 @@ class ServerDataModel(DataModelBase):
 
     def training_step(self, train_batch, batch_idx):
         data, labels = train_batch
-        _, logits = self(data)
+        _, predictions = self(data)
+        #logits = nn.Softmax(dim=1)(predictions)
         classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
                                                   epsilon=self.hparams.epsilon,
-                                                  use_gpu=self.device == "cuda")(logits, labels)
+                                                  use_gpu=self.device == "cuda")(predictions, labels)
         self.log("classifier_loss", classifier_loss)
         lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
                      max_iter=self.trainer.estimated_stepping_batches)
@@ -129,9 +134,9 @@ class ServerDataModel(DataModelBase):
 
     def validation_step(self, train_batch, batch_idx):
         data, labels = train_batch
-        _, logits = self(data)
+        _, predictions = self(data)
         #logits = nn.Softmax(dim=1)(predictions)
-        _, predict = torch.max(logits, 1)
+        _, predict = torch.max(predictions, 1)
         self.val_acc(predict, labels.squeeze())
         self.log("val_acc", self.val_acc)
         # return validation accuracy
@@ -139,9 +144,9 @@ class ServerDataModel(DataModelBase):
 
     def test_step(self, test_batch, batch_idx):
         data, labels = test_batch
-        _, logits = self(data)
+        _, predictions = self(data)
         #logits = nn.Softmax(dim=1)(predictions)
-        _, predict = torch.max(logits, 1)
+        _, predict = torch.max(predictions, 1)
         self.test_acc(predict, labels.squeeze())
         self.log("test_acc", self.test_acc)
         # return validation accuracy
@@ -175,9 +180,33 @@ class ClientDataModel(DataModelBase):
             param.requires_grad = True
 
     def configure_optimizers(self):
-        param_group = self.model.get_parameters(target_adaptation=True)
+        params = [{"params": self.attention.parameters(), "lr_mult": 1.}]
         # create optimizer with parameter group
-        optimizer = optim.SGD(params=param_group, lr=self.hparams.lr, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay, nesterov=True)
+        optimizer = optim.SGD(params=params, lr=self.hparams.args.lr, momentum=self.hparams.args.momentum, weight_decay=self.hparams.args.weight_decay, nesterov=True)
         #lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=1, gamma=self.hparams.gamma)
         optimizer = op_copy(optimizer)
         return optimizer
+
+    def set_class_prototypes(self, prototypes):
+        self.class_prototypes_source = prototypes.to(self.device)
+
+    def training_step(self, train_batch, batch_idx):
+        mean_support_features = []
+        for category in train_batch:
+            data = train_batch[category][0]
+            label = train_batch[category][1]
+            f, _ = self(data)
+            mean_support_features.append(torch.mean(f, dim=0))
+        mean_features = torch.stack(mean_support_features, 0)
+        refined_f, _ = self.attention(mean_features, mean_features, mean_features)
+        distance = torch.nn.PairwiseDistance(p=2)(refined_f, self.class_prototypes_source).mean(0)
+        print("Done")
+        #logits = nn.Softmax(dim=1)(predictions)
+        #classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
+                                                  #epsilon=self.hparams.epsilon,
+                                                  #use_gpu=self.device == "cuda")(predictions, labels)
+        #self.log("classifier_loss", classifier_loss)
+        #lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
+                     #max_iter=self.trainer.estimated_stepping_batches)
+        # return train loss
+        return {'loss': distance}

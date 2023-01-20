@@ -10,11 +10,8 @@ from argparse import ArgumentParser
 
 # TorchVision
 from flwr.common import FitRes, FitIns, GetPropertiesRes, GetPropertiesIns, GetParametersIns, GetParametersRes, parameters_to_ndarrays
-from torch.utils.data import DataLoader, Subset
-from torchvision import transforms
 
 # flower framework
-import flwr as fl
 from flwr.client import start_client
 from flwr.common.typing import Code, Parameters, Status, EvaluateIns, EvaluateRes
 
@@ -32,7 +29,8 @@ from lightningdata.modules.domain_adaptation.office31_datamodule import Office31
 # from lightningdata.common.pre_process import ResizeImage
 
 # project imports
-from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes, create_fewshot_loaders
+from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes, create_fewshot_loaders, \
+    parse_network_type, NetworkType, ClientAdaptationType
 
 from models import ClientDataModel, ServerDataModel
 
@@ -75,6 +73,7 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         self.episodic_categories = list()
         self.loaders = dict()
         self.training_episodes = None
+        self.network_type = None
 
         print("[CLIENT " + str(self.c_id) + "] Init ProtoFewShotPlusClient with id" + str(c_id))
 
@@ -106,6 +105,9 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         if "training_episodes" in ins.config:
             self.training_episodes = int(ins.config["training_episodes"])
 
+        if "network_type" in ins.config:
+            self.network_type = parse_network_type(ins.config["network_type"])
+
         if ins.parameters.tensors is not None:
             # saving the most recent prototypes
             np_list = parameters_to_ndarrays(ins.parameters)
@@ -120,75 +122,45 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         """Generates query and support sets according to the N/K parameters"""
 
         # check if the dataloaders are already set
-        if len(self.loaders) > 0:
+        if self.loaders:
             return
 
         self.loaders = create_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
-        """
-        train_set = self.datamodule.train_set.dataset
-
-        # create dictionary with index lists
-        index_dict = dict()
-        for category in self.episodic_categories:
-            index_dict[str(category)] = list()
-
-        # run through dataset
-        for batch_idx, (_, labels) in enumerate(train_set):
-            for label_idx, label in enumerate(labels):
-                if label in self.episodic_categories:
-                    batch_size = len(labels)
-                    idx = batch_idx * batch_size + label_idx
-                    index_dict[str(label)].append(idx)
-
-        # create subsets form indices
-        for key in index_dict:
-            idx_subset = index_dict[key]
-            # shuffle indiceson
-            random.shuffle(idx_subset)
-            # create support set
-            k_samples = idx_subset[-self.K:]
-            del idx_subset[-self.K:]
-            support_subset = Subset(train_set, k_samples)
-            support_dataloader = DataLoader(support_subset, batch_size=len(k_samples), shuffle=True)
-
-             # create query set
-            query_samples = idx_subset #[-query:]
-            query_subset = Subset(train_set, query_samples)
-            query_dataloader = DataLoader(query_subset, batch_size=len(query_samples))
-            #query_loaders.append(dataloader)
-            self.loaders[key] = (support_dataloader, query_dataloader)
-        """
 
         print("[CLIENT " + str(self.c_id) + "] Query and support sets generated")
 
-    def train_episodic_prototypes(self):
-        print("[CLIENT " + str(self.c_id) + "] Train episodic prototypes")
-        return None, None
+    def prototypes_adaptation(self, adaptation_type=ClientAdaptationType.MEAN_EMBEDDING):
+        print("[CLIENT " + str(self.c_id) + "] Adapt global prototypes to target samples")
+        prototypes = None
+        if ClientAdaptationType.MEAN_EMBEDDING == adaptation_type:
+            print("[CLIENT " + str(self.c_id) + "] Prototype creation using mean embedding vector of target samples")
+            with torch.no_grad():
+                self.localModel.model.eval()
+                protos = []
+                for key in self.loaders[0].keys():
+                    for data, labels in self.loaders[0][key]:
+                        data = data.to(DEVICE)
+                        f, _ = self.localModel.model(data)
+                        protos.append(torch.mean(f, dim=0))
+                prototypes = torch.stack(protos, 0)
+            return prototypes.detach().clone()
+        else:
+            # create new trainer instance for this federated learning round
+            trainer = Trainer.from_argparse_args(self.trainer_config)
+            # overwrite class level prototypes
+            self.localModel.model.set_class_prototypes(self.prototypes[self.episodic_categories])
+
+            for episode in range(self.training_episodes):
+                print("[CLIENT " + str(self.c_id) + "] Training episode " + str(episode))
+                # resample from target images
+                self.loaders = create_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
+                # train
+                trainer.fit(self.localModel.model, self.loaders[0]) #pass only support data
+        return
 
     def evaluate_client_model(self):
-        acc = test_prototypes(self.localModel.model, self.prototypes[self.episodic_categories], self.loaders, DEVICE)
-        """
-        with torch.no_grad():
-            self.localModel.model.eval()
-            predictions_total = 0
-            true_predictions = 0
-            learned_category_idx = list(self.loaders.keys())
-            for category_idx in learned_category_idx:
-                query_loader = self.loaders[category_idx][1]
-                for data, labels in query_loader:
-                    data = data.to(DEVICE)
-                    _, preds = self.localModel.model(data)
-                    # TODO: make more efficient
-                    for idx, sample in enumerate(preds):
-                        dist = torch.squeeze(
-                            torch.cdist(prototypes[None].flatten(2), torch.unsqueeze(sample, dim=0)))
-                        index_sorted = torch.argsort(dist)
-                        predicted_label = learned_category_idx[index_sorted[0]]
-                        if predicted_label == labels[idx].item():
-                            true_predictions = true_predictions + 1
-                        predictions_total = predictions_total + 1
-        acc = float(true_predictions) / predictions_total"""
-        print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories= " + str(acc))
+        acc = test_prototypes(self.localModel.model, self.prototypes[self.episodic_categories], self.loaders, DEVICE, network_type=NetworkType.PROTOTYPICAL)
+        print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories on source prototypes= " + str(acc))
         return acc
 
     def fit(self, ins: FitIns) -> FitRes:
@@ -217,13 +189,17 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         self.generate_base_dataloaders()
 
         #best_episodic_prototypes, best_model = self.prototypes, self.model#self.train_episodic_prototypes()
+        target_prototypes = self.prototypes_adaptation()
+
+        acc = test_prototypes(self.localModel.model, target_prototypes, self.loaders, DEVICE,
+                              network_type=NetworkType.PROTOTYPICAL)
+        print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories on target prototype= " + str(acc))
 
         ret_status = Status(code=Code.OK, message="OK")
         ret_params = Parameters(tensor_type="", tensors=[])
         ret_metrics = dict()
         ret_metrics["duration"] = timeit.default_timer() - fit_begin
         ret_metrics["client_id"] = self.c_id
-
 
         return FitRes(status=ret_status,
                       parameters=ret_params,

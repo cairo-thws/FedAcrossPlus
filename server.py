@@ -32,8 +32,11 @@ from torch.utils.data import Subset, DataLoader
 
 import common
 from strategy import ProtoFewShotPlusStrategy
-from common import add_project_specific_args, signal_handler_free_cuda, Defaults, test_prototypes
+from common import add_project_specific_args, signal_handler_free_cuda, Defaults, test_prototypes, NetworkType
 from models import ServerDataModel
+
+
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
 
 """
 If you get an error like: “failed to connect to all addresses” “grpc_status”:14 
@@ -81,6 +84,33 @@ class LightningFlowerServerModel(LightningFlowerModel):
         return None#weights_to_parameters(weights)
 
 
+def check_dataset_mean(model, path, dataloader):
+    mean_file_exists = os.path.exists(path)
+    if mean_file_exists:
+        dataset_mean = torch.load(path)
+    else:
+        dataset_mean = generate_dataset_mean(model, dataloader)
+        torch.save(dataset_mean, path)
+    dataset_mean = dataset_mean.to(DEVICE)
+    return dataset_mean
+
+
+def generate_dataset_mean(model, data_loader: DataLoader):
+    print("[MODEL] Creating dataset mean tensor, please wait ...")
+    with torch.no_grad():
+        model.eval()
+        dataset_mean = []
+        for data, _ in data_loader:
+            data = data.to(DEVICE)
+            f, _ = model(data)
+            dataset_mean.append(torch.sum(f, dim=0))
+    mean_tensor = torch.stack(dataset_mean, 0)
+    ds_size = len(data_loader.dataset)
+    mean_tensor = torch.sum(mean_tensor, dim=0)/ds_size
+    print("[MODEL] Finished creating mean tensor.")
+    return mean_tensor.detach().clone()
+
+
 def create_class_prototypes(model, data_loader: DataLoader):
     # subsets = {target: Subset(train_set, [i for i, (x, y) in enumerate(train_set) if y == target]) for _, target in
     # train_set.class_to_idx.items()}
@@ -111,6 +141,7 @@ def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=Fa
     trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
     static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + ".pt")
     static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_protos.pt")
+
     checkpoint_path = trainer_args.ckpt_path if trainer_args.ckpt_path != "" else None
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=checkpoint_path)
     # update current model
@@ -146,12 +177,12 @@ def get_source_test_augmentation():
     pass
 
 
-def evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args):
+def evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean=None):
     episodic_categories = random.sample(range(0, source_dm.num_classes), args.N)
     loaders = common.create_fewshot_loaders(source_dm, episodic_categories, args.K)
     best_source_protos = best_source_protos.to(DEVICE)
     best_source_model = best_source_model.to(DEVICE)
-    acc = test_prototypes(best_source_model, best_source_protos[episodic_categories], loaders, DEVICE)
+    acc = test_prototypes(best_source_model, best_source_protos[episodic_categories], loaders, DEVICE, NetworkType.PROTOTYPICAL, dataset_mean)
     print("[SERVER] Accuracy of class prototypes on source training data is " + str(acc))
 
 
@@ -184,52 +215,89 @@ def main() -> None:
                         domain=domain,
                         batch_size=args.batch_size_train,
                         num_workers=args.num_workers,
-                        #train_transforms=transform_train,
-                        #test_transforms=transform_test,
                         shuffle=True
                         )
 
     best_source_model = None
     path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
+    path_to_protos = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_protos.pt")
+    path_to_mean_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_mean.pt")
     model_file_exists = os.path.exists(path_to_file)
 
     # pre-train the model on plain source data
     if args.pretrain:
-        print("[SERVER] Load and test pretrained source model")
-        source_model = ServerDataModel(name=str(source_dm.get_dataset_name()),
-                                       num_classes=31,
-                                       lr=Defaults.SERVER_LR,
-                                       momentum=Defaults.SERVER_LR_MOMENTUM,
-                                       gamma=Defaults.SERVER_LR_GAMMA,
-                                       weight_decay=Defaults.SERVER_LR_WD,
-                                       epsilon=Defaults.SERVER_LOSS_EPSILON)
+        if not model_file_exists:
+            print("[SERVER] Train and test pretrained source model and create prototypes")
+            source_model = ServerDataModel(name=str(source_dm.get_dataset_name()),
+                                           num_classes=31,
+                                           lr=Defaults.SERVER_LR,
+                                           momentum=Defaults.SERVER_LR_MOMENTUM,
+                                           gamma=Defaults.SERVER_LR_GAMMA,
+                                           weight_decay=Defaults.SERVER_LR_WD,
+                                           epsilon=Defaults.SERVER_LOSS_EPSILON)
 
-        # move source model to current device
-        source_model = source_model.to(DEVICE)
+            # move source model to current device
+            source_model = source_model.to(DEVICE)
 
-        # print model information
-        #print(source_model)
+            # start the server-side source training
+            best_source_model, best_source_protos = pre_train_server_model(model=source_model,
+                                                                           datamodule=source_dm,
+                                                                           trainer_args=args,
+                                                                           create_prototypes=True)
 
-        # start the server-side source training
-        best_source_model, best_source_protos = pre_train_server_model(source_model, source_dm, args, create_prototypes=True)
+            # create dataset mean
+            source_dm.prepare_data()
+            source_dm.setup()
+            dataset_mean = check_dataset_mean(best_source_model, path_to_mean_file, source_dm.train_dataloader())
+            best_source_model.set_training_dataset_mean(dataset_mean)
+        else:
+            print("[SERVER] Load and test pretrained source model and create prototypes on demand")
+            best_source_model = torch.load(path_to_file)
+
+            # calculate source prototypes
+            if os.path.exists(path_to_protos):
+                best_source_protos = torch.load(path_to_protos)
+            else:
+                source_dm.prepare_data()
+                source_dm.setup()
+                best_source_protos = create_class_prototypes(best_source_model, source_dm.train_dataloader())
+                torch.save(best_source_protos, path_to_protos)
+
+            # create dataset mean
+            source_dm.prepare_data()
+            source_dm.setup()
+            dataset_mean = check_dataset_mean(best_source_model, path_to_mean_file, source_dm.train_dataloader())
+            best_source_model.set_training_dataset_mean(dataset_mean)
+
+        # move data and model to DEVICE
+        best_source_model = best_source_model.to(DEVICE)
+        best_source_protos = best_source_protos.to(DEVICE)
+
         print("[SERVER] Done. Evaluating pretrained model")
-
         # evaluation
+        source_dm.prepare_data()
+        source_dm.setup()
         evaluate_server_model(best_source_model, source_dm, args)
     elif model_file_exists:
         print("[SERVER] Load and test pretrained source model")
-        #best_source_model = ServerDataModel.load_from_checkpoint(
-            #checkpoint_path=os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".ckpt"))
-        best_source_model = torch.load(os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt"))
-        best_source_protos = torch.load(
-            os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_protos.pt"))
+        best_source_model = torch.load(path_to_file)
+        best_source_protos = torch.load(path_to_protos)
+
         # move source model and prototypes to current device
         best_source_model = best_source_model.to(DEVICE)
         best_source_protos = best_source_protos.to(DEVICE)
+
+        # create dataset mean
+        source_dm.prepare_data()
+        source_dm.setup()
+        dataset_mean = check_dataset_mean(best_source_model, path_to_mean_file, source_dm.train_dataloader())
+        best_source_model.set_training_dataset_mean(dataset_mean)
+
         # evaluation
         evaluate_server_model(best_source_model, source_dm, args)
 
-    evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args)
+    # evaluation of source prototypes on source test set
+    evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean)
 
     # bring source model into server mode and wrap it into LF
     lightning_flower_server_model = LightningFlowerServerModel(model=best_source_model,

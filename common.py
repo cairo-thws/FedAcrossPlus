@@ -4,6 +4,22 @@ import sys
 import random
 
 from torch.utils.data import Subset, DataLoader
+import metric
+import torch.nn.functional as F
+
+
+class ClientAdaptationType(object):
+    MEAN_EMBEDDING = 0
+
+
+class NetworkType(object):
+    PROTOTYPICAL = 0,
+    MATCHING = 1
+
+
+class DistanceMetric(object):
+    EUCLIDEAN = 0,
+    KL_DIV = 1
 
 
 class Defaults(object):
@@ -44,24 +60,53 @@ def print_args(args):
     return s
 
 
-def test_prototypes(model, prototypes, loaders, device):
+def parse_metric(param_str):
+    if param_str == "euclidean":
+        return DistanceMetric.EUCLIDEAN
+    elif param_str == "kl_divergence":
+        return DistanceMetric.KL_DIV
+
+
+def parse_network_type(type_str):
+    if type_str == "prototypical":
+        return NetworkType.PROTOTYPICAL
+    elif type_str == "matching":
+        return NetworkType.MATCHING
+
+
+def test_prototypes(model, prototypes, loaders, device, network_type=NetworkType.PROTOTYPICAL, dataset_mean=None):
     with torch.no_grad():
         model.eval()
+        if dataset_mean is not None:
+            # center prototypes
+            prototypes = prototypes - dataset_mean
+            prototypes = prototypes / torch.norm(prototypes, p=2)
         predictions_total = 0
         true_predictions = 0
-        learned_category_idx = list(loaders.keys())
+        learned_category_idx = list(loaders[1].keys())
         for category_idx in learned_category_idx:
-            query_loader = loaders[category_idx][1]
+            query_loader = loaders[1][category_idx]
             for data, labels in query_loader:
                 data = data.to(device)
                 f, _ = model(data)
-                # TODO: make more efficient
-                for idx, sample in enumerate(f):
-                    dist = torch.squeeze(
-                        torch.cdist(prototypes[None].flatten(2), torch.unsqueeze(sample, dim=0)))
-                    index_sorted = torch.argsort(dist)
-                    predicted_label = learned_category_idx[index_sorted[0]]
-                    if predicted_label == labels[idx].item():
+                if network_type == NetworkType.PROTOTYPICAL:
+                    if dataset_mean is not None:
+                        # center feature vector
+                        f = f - dataset_mean
+                        # gallery = gallery / LA.norm(gallery, 2, 1)[:, None]
+                        f = f / torch.norm(f, p=2)
+                    dist = metric.euclidean_distance(prototypes, f)
+                    max_indices = torch.argmax(-dist, dim=0)
+                elif network_type == NetworkType.MATCHING:
+                    # euclidean distance + soft assignment
+                    pass
+                    #dist = metric.kl_divergence(prototypes, f)
+                    #max_indices = torch.argmax(F.log_softmax(-dist, dim=0), 0)
+                #min_indices = torch.argmin(dist, 0)
+                # @todo this can be optimized
+                for label_id, max_idx in enumerate(max_indices):
+                    predicted_label = learned_category_idx[max_idx]
+                    if predicted_label == labels[label_id].item():
                         true_predictions = true_predictions + 1
                     predictions_total = predictions_total + 1
         acc = float(true_predictions) / predictions_total
@@ -69,7 +114,9 @@ def test_prototypes(model, prototypes, loaders, device):
 
 
 def create_fewshot_loaders(datamodule, episodic_categories, K):
-    loaders = dict()
+    #loaders = dict()
+    support_loaders = dict()
+    query_loaders = dict()
     train_set = datamodule.train_set.dataset
 
     # create dictionary with index lists
@@ -100,7 +147,10 @@ def create_fewshot_loaders(datamodule, episodic_categories, K):
         query_samples = idx_subset  # [-query:]
         query_subset = Subset(train_set, query_samples)
         query_dataloader = DataLoader(query_subset, batch_size=len(query_samples))
-        # query_loaders.append(dataloader)
-        loaders[int(key)] = (support_dataloader, query_dataloader)
 
-    return loaders
+        support_loaders[int(key)] = support_dataloader
+        query_loaders[int(key)] = query_dataloader
+        #query_loaders.append(dataloader)
+        #loaders[int(key)] = (support_dataloader, query_dataloader)
+
+    return support_loaders, query_loaders

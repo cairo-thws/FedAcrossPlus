@@ -102,8 +102,8 @@ class ServerDataModel(DataModelBase):
         for param in self.model.head.parameters():
             param.requires_grad = True
 
-        self.val_acc = Accuracy()
-        self.test_acc = Accuracy()
+        self.val_acc = Accuracy(task="multiclass", num_classes=num_classes)
+        self.test_acc = Accuracy(task="multiclass", num_classes=num_classes)
 
         # print the model summary
         # summary(classifier, input_size=(3, 224, 224))

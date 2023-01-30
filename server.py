@@ -3,6 +3,7 @@ import os
 import random
 import signal
 import torch
+import copy
 
 from argparse import ArgumentParser
 
@@ -37,6 +38,7 @@ from models import ServerDataModel
 
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
+os.environ["GRPC_VERBOSITY"] = "debug"
 
 """
 If you get an error like: “failed to connect to all addresses” “grpc_status”:14 
@@ -136,10 +138,11 @@ def create_class_prototypes(model, data_loader: DataLoader):
 def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=False):
     # Init ModelCheckpoint callback, monitoring "val_loss"
     checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True, mode="max")
-    early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.01, patience=3, verbose=True, mode="min")
+    early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.005, patience=5, verbose=True, mode="min")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
-    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + ".pt")
+    static_pt_path_model_gpu = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_gpu.pt")
+    static_pt_path_model_cpu = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_cpu.pt")
     static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_protos.pt")
 
     checkpoint_path = trainer_args.ckpt_path if trainer_args.ckpt_path != "" else None
@@ -152,7 +155,19 @@ def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=Fa
         if create_prototypes:
             best_model_prototypes = create_class_prototypes(best_model, datamodule.train_dataloader())
         # save to disk
-        torch.save(best_model_pl, static_pt_path_model)
+        if DEVICE == "cuda":
+            torch.save(best_model_pl, static_pt_path_model_gpu)
+            model_copy = copy.deepcopy(best_model_pl)
+            model_copy.to("cpu")
+            torch.save(model_copy, static_pt_path_model_cpu)
+            del model_copy
+        else:
+            torch.save(best_model_pl, static_pt_path_model_cpu)
+            model_copy = copy.deepcopy(best_model_pl)
+            model_copy.to("cpu")
+            torch.save(model_copy, static_pt_path_model_cpu)
+            del model_copy
+
         torch.save(best_model_prototypes, static_pt_path_protos)
         return best_model_pl, best_model_prototypes
     # trainer.validate(model=model, datamodule=datamodule)
@@ -219,7 +234,10 @@ def main() -> None:
                         )
 
     best_source_model = None
-    path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
+    if DEVICE == "gpu":
+        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_gpu.pt")
+    else:
+        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_cpu.pt")
     path_to_protos = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_protos.pt")
     path_to_mean_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_mean.pt")
     model_file_exists = os.path.exists(path_to_file)
@@ -349,5 +367,6 @@ if __name__ == "__main__":
 
 
 """
---fast_dev_run=False --num_workers=6 --max_epochs=1 --dataset_path="data/" --batch_size_train=64 --batch_size_test=192 --pretrain=False --backbone="resnet50" --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1
+# cluster 1 gpu setup
+--fast_dev_run=False --num_workers=6 --dataset_path="data/" --batch_size_train=128 --batch_size_test=128 --pretrain=False --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --accelerator="gpu" --devices=1 --max_epochs=50 --log_every_n_steps=1 --host_address="localhost:8080
 """

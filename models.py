@@ -66,7 +66,7 @@ def lr_scheduler(optimizer, iter_num, max_iter, gamma=10, power=0.75):
 
 
 class DataModelBase(pl.LightningModule):
-    def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon):
+    def __init__(self):
         super().__init__()
         # training dataset mean
         self.training_dataset_mean = None
@@ -162,8 +162,8 @@ class ServerDataModel(DataModelBase):
 
 
 class ClientDataModel(DataModelBase):
-    def __init__(self, pretrained_model, args):
-        super().__init__(*args)
+    def __init__(self, pretrained_model):
+        super().__init__()
         self.model = pretrained_model
         self.class_prototypes_source = None
         self.episodic_prototypes = None

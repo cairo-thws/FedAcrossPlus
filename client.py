@@ -268,19 +268,22 @@ def main() -> None:
                        shuffle=False)  # do not shuffle data for self supervised label discovery
 
     # load pretrained server model
-    path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
+    if DEVICE == "cpu":
+        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_cpu.pt")
+    else:
+        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_gpu.pt")
     model_file_exists = os.path.exists(path_to_file)
     if model_file_exists:
         server_model = torch.load(path_to_file)
-        pretrained_model = server_model.model#.to(DEVICE)
-        client_data_model = ClientDataModel(pretrained_model=pretrained_model, args=server_model.hparams)
+        #pretrained_model = server_model.model#.to(DEVICE)
+        client_data_model = ClientDataModel(pretrained_model=server_model)
         client_data_model = client_data_model.to(DEVICE)
         client_model = LightningFlowerModel(model=client_data_model,
                                             name=Office31DataModule.get_dataset_name() + "_client_model",
                                             strict_params=True)
         # free some memory
         del server_model
-        del pretrained_model
+        #del pretrained_model
         gc.collect()
 
         # prepare datamodule, overwrite presplit setting

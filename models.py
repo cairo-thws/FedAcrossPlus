@@ -80,20 +80,23 @@ class DataModelBase(pl.LightningModule):
 
 
 class ServerDataModel(DataModelBase):
-    def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon):
-        super().__init__(name, num_classes, lr, momentum, gamma, weight_decay, epsilon)
+    def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon, pretrain=True):
+        super().__init__()
 
         # make hyperparameter available via self.hparams
         self.save_hyperparameters()
 
-        ## set base network
-        backbone = backbones.resnet50(pretrained=True)
+        # fetch backbone as base network
+        backbone = backbones.resnet50(pretrained=pretrain)
 
         # model
-        self.model = classifier.ImageClassifier(backbone=backbone, num_classes=self.hparams.num_classes, bottleneck_dim=self.hparams.num_classes)
+        self.model = classifier.ImageClassifier(backbone=backbone,
+                                                num_classes=self.hparams.num_classes,
+                                                bottleneck_dim=self.hparams.num_classes)
 
         # initialize classifier head
         self.model.head.apply(init_weights)
+
         # set params learnable/frozen
         for param in self.model.backbone.parameters():
             param.requires_grad = True
@@ -102,8 +105,9 @@ class ServerDataModel(DataModelBase):
         for param in self.model.head.parameters():
             param.requires_grad = True
 
-        self.val_acc = Accuracy(task="multiclass", num_classes=num_classes)
-        self.test_acc = Accuracy(task="multiclass", num_classes=num_classes)
+        # initialize accuracy tracker for a multiclass prediction task
+        self.val_acc = Accuracy(task="multiclass", num_classes=num_classes, top_k=1)
+        self.test_acc = Accuracy(task="multiclass", num_classes=num_classes, top_k=1)
 
         # print the model summary
         # summary(classifier, input_size=(3, 224, 224))
@@ -162,7 +166,7 @@ class ServerDataModel(DataModelBase):
 
 
 class ClientDataModel(DataModelBase):
-    def __init__(self, pretrained_model):
+    def __init__(self, pretrained_model=None):
         super().__init__()
         self.model = pretrained_model
         self.class_prototypes_source = None

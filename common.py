@@ -6,6 +6,7 @@ import random
 from torch.utils.data import Subset, DataLoader
 import metric
 import torch.nn.functional as F
+from models import ServerDataModel, ClientDataModel
 
 
 class ClientAdaptationType(object):
@@ -154,3 +155,23 @@ def create_fewshot_loaders(datamodule, episodic_categories, K):
         #loaders[int(key)] = (support_dataloader, query_dataloader)
 
     return support_loaders, query_loaders
+
+
+def create_empty_server_model(name,
+                              num_classes,
+                              lr,
+                              momentum,
+                              gamma,
+                              weight_decay,
+                              epsilon,
+                              pretrain):
+    model = ServerDataModel(name=name,
+                            num_classes=num_classes,
+                            lr=lr,
+                            momentum=momentum,
+                            gamma=gamma,
+                            weight_decay=weight_decay,
+                            epsilon=epsilon,
+                            pretrain=pretrain)
+    return model
+

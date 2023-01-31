@@ -29,8 +29,9 @@ from lightningdata.modules.domain_adaptation.office31_datamodule import Office31
 # from lightningdata.common.pre_process import ResizeImage
 
 # project imports
+import common
 from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes, create_fewshot_loaders, \
-    parse_network_type, NetworkType, ClientAdaptationType
+    parse_network_type, NetworkType, ClientAdaptationType, Defaults
 
 from models import ClientDataModel, ServerDataModel
 
@@ -268,15 +269,20 @@ def main() -> None:
                        shuffle=False)  # do not shuffle data for self supervised label discovery
 
     # load pretrained server model
-    if DEVICE == "cpu":
-        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_cpu.pt")
-    else:
-        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_gpu.pt")
+    path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
     model_file_exists = os.path.exists(path_to_file)
     if model_file_exists:
-        server_model = torch.load(path_to_file)
-        #pretrained_model = server_model.model#.to(DEVICE)
-        client_data_model = ClientDataModel(pretrained_model=server_model)
+        server_model = common.create_empty_server_model(name=str(dm_train.get_dataset_name()),
+                                                        num_classes=31,
+                                                        lr=Defaults.SERVER_LR,
+                                                        momentum=Defaults.SERVER_LR_MOMENTUM,
+                                                        gamma=Defaults.SERVER_LR_GAMMA,
+                                                        weight_decay=Defaults.SERVER_LR_WD,
+                                                        epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                        pretrain=False)
+        server_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
+        pretrained_model = server_model.model#.to(DEVICE)
+        client_data_model = ClientDataModel(pretrained_model=pretrained_model)
         client_data_model = client_data_model.to(DEVICE)
         client_model = LightningFlowerModel(model=client_data_model,
                                             name=Office31DataModule.get_dataset_name() + "_client_model",

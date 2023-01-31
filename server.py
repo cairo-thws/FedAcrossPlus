@@ -89,7 +89,7 @@ class LightningFlowerServerModel(LightningFlowerModel):
 def check_dataset_mean(model, path, dataloader):
     mean_file_exists = os.path.exists(path)
     if mean_file_exists:
-        dataset_mean = torch.load(path)
+        dataset_mean = torch.load(path, map_location=DEVICE)
     else:
         dataset_mean = generate_dataset_mean(model, dataloader)
         torch.save(dataset_mean, path)
@@ -141,8 +141,7 @@ def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=Fa
     early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.005, patience=5, verbose=True, mode="min")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
-    static_pt_path_model_gpu = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_gpu.pt")
-    static_pt_path_model_cpu = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_cpu.pt")
+    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + ".pt")
     static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_protos.pt")
 
     checkpoint_path = trainer_args.ckpt_path if trainer_args.ckpt_path != "" else None
@@ -154,23 +153,13 @@ def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=Fa
         best_model = best_model_pl.model.to(DEVICE)
         if create_prototypes:
             best_model_prototypes = create_class_prototypes(best_model, datamodule.train_dataloader())
-        # save to disk
-        if DEVICE == "cuda":
-            torch.save(best_model_pl, static_pt_path_model_gpu)
-            model_copy = copy.deepcopy(best_model_pl)
-            model_copy.to("cpu")
-            torch.save(model_copy, static_pt_path_model_cpu)
-            del model_copy
-        else:
-            torch.save(best_model_pl, static_pt_path_model_cpu)
-            model_copy = copy.deepcopy(best_model_pl)
-            model_copy.to("cpu")
-            torch.save(model_copy, static_pt_path_model_cpu)
-            del model_copy
-
+        # save state dict of best model to disk
+        torch.save(best_model_pl.state_dict(), static_pt_path_model)
+        # save prototypes of best model to disk
         torch.save(best_model_prototypes, static_pt_path_protos)
         return best_model_pl, best_model_prototypes
     # trainer.validate(model=model, datamodule=datamodule)
+    print("[MODEL] No best model available")
     return None, None
 
 
@@ -234,10 +223,7 @@ def main() -> None:
                         )
 
     best_source_model = None
-    if DEVICE == "gpu":
-        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_gpu.pt")
-    else:
-        path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_cpu.pt")
+    path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
     path_to_protos = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_protos.pt")
     path_to_mean_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_mean.pt")
     model_file_exists = os.path.exists(path_to_file)
@@ -246,13 +232,14 @@ def main() -> None:
     if args.pretrain:
         if not model_file_exists:
             print("[SERVER] Train and test pretrained source model and create prototypes")
-            source_model = ServerDataModel(name=str(source_dm.get_dataset_name()),
-                                           num_classes=31,
-                                           lr=Defaults.SERVER_LR,
-                                           momentum=Defaults.SERVER_LR_MOMENTUM,
-                                           gamma=Defaults.SERVER_LR_GAMMA,
-                                           weight_decay=Defaults.SERVER_LR_WD,
-                                           epsilon=Defaults.SERVER_LOSS_EPSILON)
+            source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
+                                                            num_classes=31,
+                                                            lr=Defaults.SERVER_LR,
+                                                            momentum=Defaults.SERVER_LR_MOMENTUM,
+                                                            gamma=Defaults.SERVER_LR_GAMMA,
+                                                            weight_decay=Defaults.SERVER_LR_WD,
+                                                            epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                            pretrain=True)
 
             # move source model to current device
             source_model = source_model.to(DEVICE)
@@ -270,7 +257,15 @@ def main() -> None:
             best_source_model.set_training_dataset_mean(dataset_mean)
         else:
             print("[SERVER] Load and test pretrained source model and create prototypes on demand")
-            best_source_model = torch.load(path_to_file)
+            best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
+                                                                 num_classes=31,
+                                                                 lr=Defaults.SERVER_LR,
+                                                                 momentum=Defaults.SERVER_LR_MOMENTUM,
+                                                                 gamma=Defaults.SERVER_LR_GAMMA,
+                                                                 weight_decay=Defaults.SERVER_LR_WD,
+                                                                 epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                                 pretrain=False)
+            best_source_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
 
             # calculate source prototypes
             if os.path.exists(path_to_protos):
@@ -298,7 +293,15 @@ def main() -> None:
         evaluate_server_model(best_source_model, source_dm, args)
     elif model_file_exists:
         print("[SERVER] Load and test pretrained source model")
-        best_source_model = torch.load(path_to_file)
+        best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
+                                                             num_classes=31,
+                                                             lr=Defaults.SERVER_LR,
+                                                             momentum=Defaults.SERVER_LR_MOMENTUM,
+                                                             gamma=Defaults.SERVER_LR_GAMMA,
+                                                             weight_decay=Defaults.SERVER_LR_WD,
+                                                             epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                             pretrain=False)
+        best_source_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
         best_source_protos = torch.load(path_to_protos)
 
         # move source model and prototypes to current device

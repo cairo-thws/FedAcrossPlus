@@ -63,7 +63,7 @@ def plot_prototypes(prototypes, labels, class_features=None, dataset_mean=None):
 
     #plt.tight_layout()
     plt.title("t-SNE Results")
-    plt.xlabel("Dimension 1", xlabel=)
+    plt.xlabel("Dimension 1", xlabel="CHANGE ME")
     plt.show()
     #plt.scatter(transformed_data[:, 0], transformed_data[:, 1])
     #plt.show()

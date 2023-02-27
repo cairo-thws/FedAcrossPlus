@@ -141,8 +141,8 @@ def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=Fa
     early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.005, patience=5, verbose=True, mode="min")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
-    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + ".pt")
-    static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", datamodule.get_dataset_name() + "_protos.pt")
+    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + ".pt")
+    static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_protos.pt")
 
     checkpoint_path = trainer_args.ckpt_path if trainer_args.ckpt_path != "" else None
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=checkpoint_path)
@@ -223,9 +223,9 @@ def main() -> None:
                         )
 
     best_source_model = None
-    path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
-    path_to_protos = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_protos.pt")
-    path_to_mean_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + "_mean.pt")
+    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + ".pt")
+    path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_protos.pt")
+    path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_mean.pt")
     model_file_exists = os.path.exists(path_to_file)
 
     # pre-train the model on plain source data
@@ -239,6 +239,7 @@ def main() -> None:
                                                             gamma=Defaults.SERVER_LR_GAMMA,
                                                             weight_decay=Defaults.SERVER_LR_WD,
                                                             epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                            net=args.net,
                                                             pretrain=True)
 
             # move source model to current device
@@ -264,6 +265,7 @@ def main() -> None:
                                                                  gamma=Defaults.SERVER_LR_GAMMA,
                                                                  weight_decay=Defaults.SERVER_LR_WD,
                                                                  epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                                 net=args.net,
                                                                  pretrain=False)
             best_source_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
 
@@ -300,6 +302,7 @@ def main() -> None:
                                                              gamma=Defaults.SERVER_LR_GAMMA,
                                                              weight_decay=Defaults.SERVER_LR_WD,
                                                              epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                             net=args.net,
                                                              pretrain=False)
         best_source_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
         best_source_protos = torch.load(path_to_protos)
@@ -371,5 +374,5 @@ if __name__ == "__main__":
 
 """
 # cluster 1 gpu setup
---fast_dev_run=False --num_workers=6 --dataset_path="data/" --batch_size_train=128 --batch_size_test=128 --pretrain=False --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --accelerator="gpu" --devices=1 --max_epochs=50 --log_every_n_steps=1 --host_address="localhost:8080
+--fast_dev_run=False --net="resnet34" --num_workers=6 --dataset_path="data/" --batch_size_train=128 --batch_size_test=128 --pretrain=False --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --accelerator="gpu" --devices=1 --max_epochs=50 --log_every_n_steps=1 --host_address="localhost:8080
 """

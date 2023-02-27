@@ -80,14 +80,22 @@ class DataModelBase(pl.LightningModule):
 
 
 class ServerDataModel(DataModelBase):
-    def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon, pretrain=True):
+    def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon, net="resnet50", pretrain=True):
         super().__init__()
 
         # make hyperparameter available via self.hparams
         self.save_hyperparameters()
 
         # fetch backbone as base network
-        backbone = backbones.resnet50(pretrained=pretrain)
+        if net == "resnet50":
+            backbone = backbones.resnet50(pretrained=pretrain)
+        elif net == "resnet34":
+            backbone = backbones.resnet34(pretrained=pretrain)
+        elif net == "resnet18":
+            backbone = backbones.resnet18(pretrained=pretrain)
+        else:
+            print("[MODEL]: Undefined backbone")
+
 
         # model
         self.model = classifier.ImageClassifier(backbone=backbone,

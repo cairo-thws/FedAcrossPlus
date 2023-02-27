@@ -49,6 +49,7 @@ def signal_handler_free_cuda(sig, frame):
 
 def add_project_specific_args(parent_parser):
     parser = parent_parser.add_argument_group("FedProtoShot")
+    parser.add_argument("--net", type=str, default="resnet50")
     parser.add_argument("--pretrain", type=boolean_string, default=False)
     parser.add_argument("--ckpt_path", type=str, default="")
     return parent_parser
@@ -164,6 +165,7 @@ def create_empty_server_model(name,
                               gamma,
                               weight_decay,
                               epsilon,
+                              net,
                               pretrain):
     model = ServerDataModel(name=name,
                             num_classes=num_classes,
@@ -172,6 +174,7 @@ def create_empty_server_model(name,
                             gamma=gamma,
                             weight_decay=weight_decay,
                             epsilon=epsilon,
+                            net=net,
                             pretrain=pretrain)
     return model
 

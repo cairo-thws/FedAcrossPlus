@@ -269,7 +269,7 @@ def main() -> None:
                        shuffle=False)  # do not shuffle data for self supervised label discovery
 
     # load pretrained server model
-    path_to_file = os.path.join("data", "pretrained", str(Office31DataModule.get_dataset_name()) + ".pt")
+    path_to_file = os.path.join("data", "pretrained",  str(Office31DataModule.get_dataset_name()) + ".pt")
     model_file_exists = os.path.exists(path_to_file)
     if model_file_exists:
         server_model = common.create_empty_server_model(name=str(dm_train.get_dataset_name()),
@@ -279,6 +279,7 @@ def main() -> None:
                                                         gamma=Defaults.SERVER_LR_GAMMA,
                                                         weight_decay=Defaults.SERVER_LR_WD,
                                                         epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                        net=args.net,
                                                         pretrain=False)
         server_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
         pretrained_model = server_model.model#.to(DEVICE)

@@ -146,6 +146,9 @@ def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=Fa
     early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.005, patience=5, verbose=True, mode="min")
     lr_monitor = LearningRateMonitor(logging_interval='step')
     trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
+    # check and create dirs if needed
+    if not os.path.exists(os.path.join(trainer_args.dataset_path, "pretrained")):
+        os.makedirs(os.path.join(trainer_args.dataset_path, "pretrained"))
     static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + ".pt")
     static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_protos.pt")
 
@@ -324,6 +327,9 @@ def main() -> None:
 
         # evaluation
         evaluate_server_model(best_source_model, source_dm, args)
+    else:
+        print("[SERVER]: Pretraining not activated and no pretrained model available, exiting ...")
+        return
 
     # evaluation of source prototypes on source test set
     evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean)

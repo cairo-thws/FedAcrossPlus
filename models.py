@@ -47,7 +47,7 @@ def init_weights(m):
 
 def op_copy(optimizer):
     for param_group in optimizer.param_groups:
-        param_group['lr0'] = param_group['lr']
+        param_group['lr0'] = param_group['lr'] * param_group['lr_mult']
         # @todo: see if this works here
         #param_group['weight_decay'] = 1e-3
         #param_group['momentum'] = 0.9

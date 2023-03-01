@@ -57,10 +57,11 @@ signal.signal(signal.SIGINT, signal_handler_free_cuda)
 
 
 class LightningFlowerServerModel(LightningFlowerModel):
-    def __init__(self, model, prototypes, prototype_classes, name="", strict_params=False):
+    def __init__(self, model, prototypes, prototype_classes, source_dataset_mean, name="", strict_params=False):
         super().__init__(model=model, name=name, strict_params=strict_params)
         # convert tensor to ndarray
         self.source_prototypes = prototypes
+        self.source_dataset_mean = source_dataset_mean
         self.source_classes = prototype_classes
 
     def get_source_classes(self):
@@ -68,11 +69,15 @@ class LightningFlowerServerModel(LightningFlowerModel):
 
     def get_initial_params(self):
         print("[SERVER] Providing initial server params to strategy")
-        return ndarrays_to_parameters(self.get_prototypes().cpu().detach().numpy())
+        return ndarrays_to_parameters([self.get_prototypes().cpu().detach().numpy(), self.get_dataset_mean().cpu().detach().numpy()])
 
     def get_prototypes(self):
         print("[SERVER] Providing converted ndarray protos to strategy")
         return self.source_prototypes.clone()
+
+    def get_dataset_mean(self):
+        print("[SERVER] Providing converted ndarray source dataset mean to strategy")
+        return self.source_dataset_mean.clone()
 
     def get_flwr_params(self):
         # get the weights
@@ -305,7 +310,7 @@ def main() -> None:
                                                              net=args.net,
                                                              pretrain=False)
         best_source_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
-        best_source_protos = torch.load(path_to_protos)
+        best_source_protos = torch.load(path_to_protos, map_location=DEVICE)
 
         # move source model and prototypes to current device
         best_source_model = best_source_model.to(DEVICE)
@@ -327,6 +332,7 @@ def main() -> None:
     lightning_flower_server_model = LightningFlowerServerModel(model=best_source_model,
                                                                prototypes=best_source_protos,
                                                                prototype_classes=source_dm.classes,
+                                                               source_dataset_mean=dataset_mean,
                                                                name=Office31DataModule.get_dataset_name() + "_model",
                                                                strict_params=True)
     # release memory of source data
@@ -375,4 +381,6 @@ if __name__ == "__main__":
 """
 # cluster 1 gpu setup
 --fast_dev_run=False --net="resnet34" --num_workers=6 --dataset_path="data/" --batch_size_train=128 --batch_size_test=128 --pretrain=False --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --accelerator="gpu" --devices=1 --max_epochs=50 --log_every_n_steps=1 --host_address="localhost:8080
+# CPU-only setup
+--fast_dev_run=False --net="resnet34" --num_workers=6 --dataset_path="data/" --batch_size_train=32 --batch_size_test=32 --pretrain=False --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --max_epochs=50 --log_every_n_steps=1
 """

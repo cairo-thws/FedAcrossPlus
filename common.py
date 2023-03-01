@@ -10,7 +10,8 @@ from models import ServerDataModel, ClientDataModel
 
 
 class ClientAdaptationType(object):
-    MEAN_EMBEDDING = 0
+    MEAN_EMBEDDING = 0,
+    CENTERED_MEAN_EMBEDDING = 1
 
 
 class NetworkType(object):
@@ -74,6 +75,13 @@ def parse_network_type(type_str):
         return NetworkType.PROTOTYPICAL
     elif type_str == "matching":
         return NetworkType.MATCHING
+
+
+def parse_adaptation_type(type_str):
+    if type_str == "mean_embedding":
+        return ClientAdaptationType.MEAN_EMBEDDING
+    elif type_str == "centered_mean_embedding":
+        return ClientAdaptationType.CENTERED_MEAN_EMBEDDING
 
 
 def test_prototypes(model, prototypes, loaders, device, network_type=NetworkType.PROTOTYPICAL, dataset_mean=None):

@@ -69,6 +69,7 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
         parser.add_argument("--N", type=int, default=10)
         parser.add_argument("--episodes", type=int, default=10)
         parser.add_argument("--network_type", type=str, default="prototypical")
+        parser.add_argument("--adaptation_type", type=str, default="mean_embedding")
         # FedAvg specific arguments
         parser.add_argument("--fraction_fit", type=float, default=0.5)
         parser.add_argument("--fraction_eval", type=float, default=0.5)
@@ -110,6 +111,7 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
         ret_dict["global_round"] = str(rnd)
         ret_dict["training_episodes"] = str(self.server_trainer_args.episodes)
         ret_dict["network_type"] = str(self.server_trainer_args.network_type)
+        ret_dict["adaptation_type"] = str(self.server_trainer_args.adaptation_type)
         return ret_dict
 
     def aggregate_fit(

@@ -31,7 +31,7 @@ from lightningdata.modules.domain_adaptation.office31_datamodule import Office31
 # project imports
 import common
 from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes, create_fewshot_loaders, \
-    parse_network_type, NetworkType, ClientAdaptationType, Defaults
+    parse_network_type, NetworkType, ClientAdaptationType, Defaults, parse_adaptation_type
 
 from models import ClientDataModel, ServerDataModel
 
@@ -67,6 +67,10 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         self.source_classes = list()
         # the source prototypes
         self.prototypes = None
+        # the adapted target prototypes
+        self.tuned_prototypes = None
+        # the source dataset mean
+        self.source_dataset_mean = None
         # few-shot parameters
         self.K = None
         self.N = None
@@ -75,6 +79,7 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         self.loaders = dict()
         self.training_episodes = None
         self.network_type = None
+        self.adaptation_type = None
 
         print("[CLIENT " + str(self.c_id) + "] Init ProtoFewShotPlusClient with id" + str(c_id))
 
@@ -109,12 +114,18 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         if "network_type" in ins.config:
             self.network_type = parse_network_type(ins.config["network_type"])
 
+        if "adaptation_type" in ins.config:
+            self.adaptation_type = parse_adaptation_type(ins.config["adaptation_type"])
+
         if ins.parameters.tensors is not None:
-            # saving the most recent prototypes
             np_list = parameters_to_ndarrays(ins.parameters)
-            self.prototypes = torch.stack([torch.from_numpy(item) for item in np_list], 0)
+            # saving the most recent prototypes
+            self.prototypes = torch.stack([torch.from_numpy(item) for item in np_list[0]], 0)
             self.prototypes = self.prototypes.to(DEVICE)
-            print("[CLIENT " + str(self.c_id) + "] Received new prototypes")
+            # saving the source dataset mean vector
+            self.source_dataset_mean = torch.from_numpy(np_list[1])
+            self.source_dataset_mean = self.source_dataset_mean.to(DEVICE)
+            print("[CLIENT " + str(self.c_id) + "] Received new prototypes and source dataset mean")
 
     def check_evalIns(self, ins):
         pass
@@ -144,12 +155,15 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
                         f, _ = self.localModel.model(data)
                         protos.append(torch.mean(f, dim=0))
                 prototypes = torch.stack(protos, 0)
-            return prototypes.detach().clone()
+            self.tuned_prototypes = prototypes.detach().clone()
+            return
         else:
             # create new trainer instance for this federated learning round
             trainer = Trainer.from_argparse_args(self.trainer_config)
             # overwrite class level prototypes
             self.localModel.model.set_class_prototypes(self.prototypes[self.episodic_categories])
+            # overwrite class level prototypes
+            self.localModel.model.set_source_dataset_mean(self.source_dataset_mean[self.episodic_categories])
 
             for episode in range(self.training_episodes):
                 print("[CLIENT " + str(self.c_id) + "] Training episode " + str(episode))
@@ -157,6 +171,8 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
                 self.loaders = create_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
                 # train
                 trainer.fit(self.localModel.model, self.loaders[0]) #pass only support data
+            # TODO: get adapted prototypes here
+            # self.tuned_prototypes = prototypes.detach().clone()
         return
 
     def evaluate_client_model(self):
@@ -190,9 +206,9 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         self.generate_base_dataloaders()
 
         #best_episodic_prototypes, best_model = self.prototypes, self.model#self.train_episodic_prototypes()
-        target_prototypes = self.prototypes_adaptation()
+        self.prototypes_adaptation(self.adaptation_type)
 
-        acc = test_prototypes(self.localModel.model, target_prototypes, self.loaders, DEVICE,
+        acc = test_prototypes(self.localModel.model, self.tuned_prototypes, self.loaders, DEVICE,
                               network_type=NetworkType.PROTOTYPICAL)
         print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories on target prototype= " + str(acc))
 
@@ -269,7 +285,7 @@ def main() -> None:
                        shuffle=False)  # do not shuffle data for self supervised label discovery
 
     # load pretrained server model
-    path_to_file = os.path.join("data", "pretrained",  str(Office31DataModule.get_dataset_name()) + ".pt")
+    path_to_file = os.path.join("data", "pretrained",  args.net + "_" + str(Office31DataModule.get_dataset_name()) + ".pt")
     model_file_exists = os.path.exists(path_to_file)
     if model_file_exists:
         server_model = common.create_empty_server_model(name=str(dm_train.get_dataset_name()),

@@ -178,6 +178,7 @@ class ClientDataModel(DataModelBase):
         super().__init__()
         self.model = pretrained_model
         self.class_prototypes_source = None
+        self.dataset_mean_source = None
         self.episodic_prototypes = None
         self.K = None
         self.N = None
@@ -192,7 +193,7 @@ class ClientDataModel(DataModelBase):
             param.requires_grad = True
 
     def configure_optimizers(self):
-        params = [{"params": self.attention.parameters(), "lr_mult": 1.}]
+        params = [{"params": self.model.get_parameters(target_adaptation=True), "lr_mult": 1.}]
         # create optimizer with parameter group
         optimizer = optim.SGD(params=params, lr=self.hparams.args.lr, momentum=self.hparams.args.momentum, weight_decay=self.hparams.args.weight_decay, nesterov=True)
         #lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=1, gamma=self.hparams.gamma)
@@ -202,6 +203,9 @@ class ClientDataModel(DataModelBase):
     def set_class_prototypes(self, prototypes):
         self.class_prototypes_source = prototypes.to(self.device)
 
+    def set_source_dataset_mean(self, mean):
+        self.dataset_mean_source = mean.to(self.device)
+
     def training_step(self, train_batch, batch_idx):
         mean_support_features = []
         for category in train_batch:
@@ -210,8 +214,8 @@ class ClientDataModel(DataModelBase):
             f, _ = self(data)
             mean_support_features.append(torch.mean(f, dim=0))
         mean_features = torch.stack(mean_support_features, 0)
-        refined_f, _ = self.attention(mean_features, mean_features, mean_features)
-        distance = torch.nn.PairwiseDistance(p=2)(refined_f, self.class_prototypes_source).mean(0)
+        #refined_f, _ = self.attention(mean_features, mean_features, mean_features)
+        #distance = torch.nn.PairwiseDistance(p=2)(refined_f, self.class_prototypes_source).mean(0)
         print("Done")
         #logits = nn.Softmax(dim=1)(predictions)
         #classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
@@ -221,4 +225,5 @@ class ClientDataModel(DataModelBase):
         #lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
                      #max_iter=self.trainer.estimated_stepping_batches)
         # return train loss
-        return {'loss': distance}
+        return {}
+        #return {'loss': distance}

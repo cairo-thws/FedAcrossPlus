@@ -3,7 +3,7 @@ import os
 import random
 import signal
 import torch
-import copy
+import statistics
 
 from argparse import ArgumentParser
 
@@ -140,7 +140,7 @@ def create_class_prototypes(model, data_loader: DataLoader):
     return class_prototypes.detach().clone()
 
 
-def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=False):
+def pre_train_server_model(model, datamodule, trainer_args, source_idx, create_prototypes=False):
     # Init ModelCheckpoint callback, monitoring "val_loss"
     checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True, mode="max")
     early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.005, patience=5, verbose=True, mode="min")
@@ -149,8 +149,8 @@ def pre_train_server_model(model, datamodule, trainer_args, create_prototypes=Fa
     # check and create dirs if needed
     if not os.path.exists(os.path.join(trainer_args.dataset_path, "pretrained")):
         os.makedirs(os.path.join(trainer_args.dataset_path, "pretrained"))
-    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + ".pt")
-    static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_protos.pt")
+    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_" + source_idx + ".pt")
+    static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_" + source_idx + "_protos.pt")
 
     checkpoint_path = trainer_args.ckpt_path if trainer_args.ckpt_path != "" else None
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=checkpoint_path)
@@ -190,12 +190,19 @@ def get_source_test_augmentation():
 
 
 def evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean=None):
-    episodic_categories = random.sample(range(0, source_dm.num_classes), args.N)
-    loaders = common.create_fewshot_loaders(source_dm, episodic_categories, args.K)
     best_source_protos = best_source_protos.to(DEVICE)
     best_source_model = best_source_model.to(DEVICE)
-    acc = test_prototypes(best_source_model, best_source_protos[episodic_categories], loaders, DEVICE, NetworkType.PROTOTYPICAL, dataset_mean)
-    print("[SERVER] Accuracy of class prototypes on source training data is " + str(acc))
+    total_acc = list()
+    test_queries = 3
+    print("[SERVER] Calculating mean few-shot accuracy of class prototypes on source training data over " + str(test_queries) + " runs... ")
+    for i in range(test_queries):
+        episodic_categories = random.sample(range(0, source_dm.num_classes), args.N)
+        loaders = common.create_fewshot_loaders(source_dm, episodic_categories, args.K)
+        acc = test_prototypes(best_source_model, best_source_protos[episodic_categories], loaders, DEVICE, NetworkType.PROTOTYPICAL, dataset_mean)
+        total_acc.append(acc)
+    total_mean = statistics.mean(total_acc)
+    total_stdev = statistics.stdev(total_acc)
+    print("[SERVER] Mean few-shot accuracy of class prototypes on source training data is " + str(total_mean) + " with stdev " + str(total_stdev))
 
 
 def main() -> None:
@@ -231,9 +238,9 @@ def main() -> None:
                         )
 
     best_source_model = None
-    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + ".pt")
-    path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_protos.pt")
-    path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_mean.pt")
+    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_" + str(source_idx) + ".pt")
+    path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_" + str(source_idx) + "_protos.pt")
+    path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_" + str(source_idx) + "_mean.pt")
     model_file_exists = os.path.exists(path_to_file)
 
     # pre-train the model on plain source data
@@ -253,10 +260,15 @@ def main() -> None:
             # move source model to current device
             source_model = source_model.to(DEVICE)
 
+            # next line saves untrained source model
+            #torch.save(source_model.state_dict(), os.path.join("data", "not_pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_nopretrain.pt"))
+            #return
+
             # start the server-side source training
             best_source_model, best_source_protos = pre_train_server_model(model=source_model,
                                                                            datamodule=source_dm,
                                                                            trainer_args=args,
+                                                                           source_idx=str(source_idx),
                                                                            create_prototypes=True)
 
             # create dataset mean
@@ -331,7 +343,9 @@ def main() -> None:
         print("[SERVER]: Pretraining not activated and no pretrained model available, exiting ...")
         return
 
-    # evaluation of source prototypes on source test set
+    # evaluation of source prototypes on source test set without centering
+    evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, None)
+    # evaluation of source prototypes on source test set with centering
     evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean)
 
     # bring source model into server mode and wrap it into LF

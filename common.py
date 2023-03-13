@@ -10,8 +10,9 @@ from models import ServerDataModel, ClientDataModel
 
 
 class ClientAdaptationType(object):
-    MEAN_EMBEDDING = 0,
-    CENTERED_MEAN_EMBEDDING = 1
+    NONE = 0,
+    MEAN_EMBEDDING = 1,
+    CENTERED_MEAN_EMBEDDING = 2
 
 
 class NetworkType(object):
@@ -82,6 +83,8 @@ def parse_adaptation_type(type_str):
         return ClientAdaptationType.MEAN_EMBEDDING
     elif type_str == "centered_mean_embedding":
         return ClientAdaptationType.CENTERED_MEAN_EMBEDDING
+    else:
+        return ClientAdaptationType.NONE
 
 
 def test_prototypes(model, prototypes, loaders, device, network_type=NetworkType.PROTOTYPICAL, dataset_mean=None):
@@ -99,6 +102,7 @@ def test_prototypes(model, prototypes, loaders, device, network_type=NetworkType
             for data, labels in query_loader:
                 data = data.to(device)
                 f, _ = model(data)
+                f = torch.mean(f, dim=0)
                 if network_type == NetworkType.PROTOTYPICAL:
                     if dataset_mean is not None:
                         # center feature vector
@@ -107,18 +111,12 @@ def test_prototypes(model, prototypes, loaders, device, network_type=NetworkType
                         f = f / torch.norm(f, p=2)
                     dist = metric.euclidean_distance(prototypes, f)
                     max_indices = torch.argmax(-dist, dim=0)
-                elif network_type == NetworkType.MATCHING:
-                    # euclidean distance + soft assignment
-                    pass
-                    #dist = metric.kl_divergence(prototypes, f)
-                    #max_indices = torch.argmax(F.log_softmax(-dist, dim=0), 0)
-                #min_indices = torch.argmin(dist, 0)
                 # @todo this can be optimized
-                for label_id, max_idx in enumerate(max_indices):
-                    predicted_label = learned_category_idx[max_idx]
-                    if predicted_label == labels[label_id].item():
-                        true_predictions = true_predictions + 1
-                    predictions_total = predictions_total + 1
+               # for label_id, max_idx in enumerate(max_indices):
+                predicted_label = learned_category_idx[max_indices.item()]
+                if predicted_label == labels[0].item():
+                    true_predictions = true_predictions + 1
+                predictions_total = predictions_total + 1
         acc = float(true_predictions) / predictions_total
     return acc
 
@@ -154,7 +152,7 @@ def create_fewshot_loaders(datamodule, episodic_categories, K):
         support_dataloader = DataLoader(support_subset, batch_size=len(k_samples), shuffle=True)
 
         # create query set
-        query_samples = idx_subset  # [-query:]
+        query_samples = idx_subset[-K:]
         query_subset = Subset(train_set, query_samples)
         query_dataloader = DataLoader(query_subset, batch_size=len(query_samples))
 

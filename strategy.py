@@ -151,7 +151,8 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
         for (client, eval_res) in results:
             client_id = eval_res.metrics["client_id"]
             duration = eval_res.metrics["duration"]
-            accuracy = eval_res.metrics["accuracy"]
+            accuracy = eval_res.metrics["mean_accuracy"]
+            deviation = eval_res.metrics["st_dev"]
             status = eval_res.status
-            print("[STRATEGY] Client " + str(client_id) + " returned result message= " + status.message + " with duration " + str(duration) + " and eval accuracy=" + accuracy)
+            print("[STRATEGY] Client " + str(client_id) + " returned result message= " + status.message + " with duration " + str(duration) + " and mean eval accuracy=" + accuracy + " with deviation=" + str(deviation))
         return None, {}

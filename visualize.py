@@ -1,6 +1,8 @@
 import torch
 import os
+import random
 
+import pytorch_lightning
 from lightningdata import Office31DataModule
 from sklearn.manifold import TSNE
 import numpy as np
@@ -10,9 +12,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from torch.utils.data import Subset, DataLoader
 
-from server import create_class_prototypes
+from common import Defaults, create_empty_server_model, create_fewshot_loaders
+from client import ClientDataModel
 
 os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
+# seed to make plots reproducible
+pytorch_lightning.seed_everything(42)
 
 
 def min_max_norm_tsne(x):
@@ -26,8 +31,11 @@ def min_max_norm_tsne(x):
 
 def plot_prototypes(prototypes, labels, class_features=None, dataset_mean=None):
     markers = list()
-    for i in range(prototypes.shape[0]):
-        markers.append("X")
+    sizes = list()
+    num_protos = prototypes.shape[0]
+    for i in range(num_protos):
+        markers.append('v')
+        sizes.append(1)
     #sns.set()
     sns.set_context("paper", font_scale=1.1)
     sns.set_style("ticks")
@@ -36,61 +44,103 @@ def plot_prototypes(prototypes, labels, class_features=None, dataset_mean=None):
     if class_features:
         for id, class_feature in enumerate(class_features):
             feature = class_feature.cpu().numpy()
-            prototypes = np.concatenate((prototypes, feature),axis=0)
+            prototypes = np.concatenate((prototypes, feature), axis=0)
             for x in range(0, len(class_feature)):
                 labels.append(labels[id])
-                markers.append("o")
+                markers.append('o')
+                sizes.append(1)
     # apply tsne
     transformed_data = min_max_norm_tsne(prototypes)
     # transform to dataframe
-    df = pd.DataFrame({'tsne_1': transformed_data[:, 0], 'tsne_2': transformed_data[:, 1], 'label': labels})
+    df = pd.DataFrame({'tsne_1': transformed_data[:, 0], 'tsne_2': transformed_data[:, 1], 'label': labels, 'markers': markers})
+
+    df_labels = df.iloc[num_protos: , :]
+    df_protos = df.iloc[:num_protos, :]
     # plot
-    fig, ax = plt.subplots(1)
-    plt.figure(figsize=(10, 10), dpi=300)
+    _, ax = plt.subplots(1)
+    plt.figure(figsize=(8, 8), dpi=300)
+    # scatterplot of ground truth labels projected into the embedding space
     sns.scatterplot(
         x="tsne_1", y="tsne_2",
         hue="label",
         palette=sns.color_palette("hls", nr_classes),
-        data=df,
+        data=df_labels,
+        legend=True,
+        alpha=0.5,
+        # from http://mirrors.ibiblio.org/CTAN/fonts/stix/doc/stix.pdf
+        marker='o',
+        s=30)
+
+    # scatterplot of prototypes projected into the embedding space
+    sns.scatterplot(
+        x="tsne_1", y="tsne_2",
+        #hue="label",
+        #palette=sns.color_palette("hls", nr_classes),
+        c="red",
+        data=df_protos,
         legend=False,
-        alpha=0.3)#,
-        #markers=True,
-        #style=markers)
+        alpha=0.5,
+        # from http://mirrors.ibiblio.org/CTAN/fonts/stix/doc/stix.pdf
+        marker='v',
+        s=75)
     lim = (transformed_data.min() - 0.1, transformed_data.max() + 0.1)
     ax.set_xlim(lim)
     ax.set_ylim(lim)
     ax.set_aspect('equal')
 
-    #plt.tight_layout()
     plt.title("t-SNE Results")
-    plt.xlabel("Dimension 1", xlabel="CHANGE ME")
+    plt.tight_layout()
+    #plt.xlabel("Dimension 1")
     plt.show()
-    #plt.scatter(transformed_data[:, 0], transformed_data[:, 1])
-    #plt.show()
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GENERATE = False
+GENERATE = True
 NORMALIZE = True
+USE_PRETRAIN = False
+NET = "resnet34"
+PATH_TO_PLOTS = os.path.join("data", "plot", "pretrain") if USE_PRETRAIN else os.path.join("data", "plot", "not_pretrained")
+DATASET = "office31"
+SOURCE_SUBDOMAIN_ID = "0"
+TARGET_SUBDOMAIN_ID = "1"
+FILE_ENDING = ".pt"
+SOURCE_FILE_NAME = NET + "_" + DATASET + "_" + SOURCE_SUBDOMAIN_ID
+TARGET_FILE_NAME = NET + "_" + DATASET + "_" + TARGET_SUBDOMAIN_ID
+MODEL_PATH = os.path.join("data", "pretrained", SOURCE_FILE_NAME + FILE_ENDING) if USE_PRETRAIN else os.path.join("data", "not_pretrained", SOURCE_FILE_NAME + FILE_ENDING)
+
+
+def create_prototypes():
+    pass
 
 
 def main() -> None:
+    # the dataset under testing
+    dataset = Office31DataModule
+    # the subdomain to extract features and prototypes from
+    domain = dataset.get_domain_names()[int(TARGET_SUBDOMAIN_ID)]
+    source_dm = dataset(data_dir="data",
+                        domain=domain,
+                        batch_size=32,
+                        num_workers=6,
+                        shuffle=True
+                        )
 
     if GENERATE:
         # load pretrained model
-        model = torch.load(os.path.join("data", "pretrained", "office31.pt"))
-        model = model.to(DEVICE)
-        # PREPARE SOURCE DATASET
-        dataset = Office31DataModule
-        # the first domain is server source domain
-        source_idx = 0
-        domain = dataset.get_domain_names()[source_idx]
-        source_dm = dataset(data_dir="data",
-                            domain=domain,
-                            batch_size=96,
-                            num_workers=6,
-                            shuffle=True
-                            )
+        server_model = create_empty_server_model(name="office31",
+                                                 num_classes=31,
+                                                 lr=Defaults.SERVER_LR,
+                                                 momentum=Defaults.SERVER_LR_MOMENTUM,
+                                                 gamma=Defaults.SERVER_LR_GAMMA,
+                                                 weight_decay=Defaults.SERVER_LR_WD,
+                                                 epsilon=Defaults.SERVER_LOSS_EPSILON,
+                                                 net=NET,
+                                                 pretrain=False)
+        server_model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+        pretrained_model = server_model.model  # .to(DEVICE)
+        client_data_model = ClientDataModel(pretrained_model=pretrained_model)
+        client_data_model = client_data_model.to(DEVICE)
+        model = client_data_model.model
 
         # prepare dataset mean
         source_dm.prepare_data()
@@ -105,7 +155,7 @@ def main() -> None:
                 dataset_mean_vec.extend(f)
 
             dataset_mean = torch.mean(torch.stack(dataset_mean_vec, 0), dim=0)
-            torch.save(dataset_mean, os.path.join("data", "plot", "office31_source_dataset_mean.pt"))
+            torch.save(dataset_mean, os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_dataset_mean.pt"))
             print("[MODEL] Finished creating dataset mean.")
 
         # prepare class prototypes
@@ -133,14 +183,16 @@ def main() -> None:
                     class_protos.append(torch.mean(f, dim=0))
             class_prototypes = torch.stack(class_protos, 0)
         print("[MODEL] Finished creating class prototypes.")
-        torch.save(class_prototypes, os.path.join("data", "plot", "office31_protos.pt"))
-        torch.save(class_features, os.path.join("data", "plot", "office31_source_class_features.pt"))
+        torch.save(class_prototypes, os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_protos.pt"))
+        torch.save(class_features, os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_class_features.pt"))
     else:
-        class_prototypes = torch.load(os.path.join("data", "plot", "office31_protos.pt"))
-        class_features = torch.load(os.path.join("data", "plot", "office31_source_class_features.pt"))
-        dataset_mean = torch.load(os.path.join("data", "plot", "office31_source_dataset_mean.pt"))
+        class_prototypes = torch.load(os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_protos.pt"))
+        class_features = torch.load(os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_class_features.pt"))
+        dataset_mean = torch.load(os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_dataset_mean.pt"))
 
-    labels = list([5, 6, 7, 8])
+
+    #labels = random.sample(range(31), 5)
+    labels = list([1, 2, 3, 4, 5])
     reduced_class_features = list()
     for idx, feature in enumerate(class_features):
         if idx in labels:

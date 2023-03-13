@@ -1,7 +1,7 @@
 import gc
 import os
 import random
-
+import statistics
 import torch
 import signal
 
@@ -157,12 +157,12 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
                 prototypes = torch.stack(protos, 0)
             self.tuned_prototypes = prototypes.detach().clone()
             return
-        else:
+        elif ClientAdaptationType.CENTERED_MEAN_EMBEDDING == adaptation_type:
             # create new trainer instance for this federated learning round
             trainer = Trainer.from_argparse_args(self.trainer_config)
             # overwrite class level prototypes
             self.localModel.model.set_class_prototypes(self.prototypes[self.episodic_categories])
-            # overwrite class level prototypes
+            # set source dataset mean
             self.localModel.model.set_source_dataset_mean(self.source_dataset_mean[self.episodic_categories])
 
             for episode in range(self.training_episodes):
@@ -173,12 +173,26 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
                 trainer.fit(self.localModel.model, self.loaders[0]) #pass only support data
             # TODO: get adapted prototypes here
             # self.tuned_prototypes = prototypes.detach().clone()
+        else:
+            # set current source prototype as target prototypes, no adaptation
+            self.tuned_prototypes = self.prototypes.detach().clone()
         return
 
     def evaluate_client_model(self):
-        acc = test_prototypes(self.localModel.model, self.prototypes[self.episodic_categories], self.loaders, DEVICE, network_type=NetworkType.PROTOTYPICAL)
-        print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories on source prototypes= " + str(acc))
-        return acc
+        total_acc = list()
+        test_queries = 5
+        print("[CLIENT " + str(self.c_id) + "] Calculating mean few-shot accuracy of class prototypes on target test data over " + str(
+            test_queries) + " runs... ")
+        for i in range(test_queries):
+            episodic_categories = random.sample(range(0, self.datamodule.num_classes), self.N)
+            test_loaders = common.create_fewshot_loaders(self.datamodule, episodic_categories, self.K)
+            acc = test_prototypes(self.localModel.model, self.tuned_prototypes[episodic_categories], test_loaders, DEVICE, network_type=NetworkType.PROTOTYPICAL, dataset_mean=self.source_dataset_mean)
+            total_acc.append(acc)
+        total_mean = statistics.mean(total_acc)
+        total_stdev = statistics.stdev(total_acc)
+        print("[CLIENT " + str(self.c_id) + "] Mean few-shot accuracy of class prototypes on target test data is " + str(
+            total_mean) + " with stdev " + str(total_stdev))
+        return total_mean, total_stdev
 
     def fit(self, ins: FitIns) -> FitRes:
         """Refine the provided weights using the locally held dataset.
@@ -208,9 +222,10 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         #best_episodic_prototypes, best_model = self.prototypes, self.model#self.train_episodic_prototypes()
         self.prototypes_adaptation(self.adaptation_type)
 
-        acc = test_prototypes(self.localModel.model, self.tuned_prototypes, self.loaders, DEVICE,
-                              network_type=NetworkType.PROTOTYPICAL)
-        print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories on target prototype= " + str(acc))
+        if not self.adaptation_type == ClientAdaptationType.NONE:
+            acc = test_prototypes(self.localModel.model, self.tuned_prototypes, self.loaders, DEVICE,
+                                  network_type=NetworkType.PROTOTYPICAL)
+            print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories using target prototype= " + str(acc))
 
         ret_status = Status(code=Code.OK, message="OK")
         ret_params = Parameters(tensor_type="", tensors=[])
@@ -228,12 +243,13 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         eval_begin = timeit.default_timer()
 
         self.check_evalIns(ins)
-        acc = self.evaluate_client_model()
+        mean_acc, deviation = self.evaluate_client_model()
 
         ret_metrics = dict()
         ret_metrics["duration"] = timeit.default_timer() - eval_begin
         ret_metrics["client_id"] = self.c_id
-        ret_metrics["accuracy"] = str(acc)
+        ret_metrics["mean_accuracy"] = str(mean_acc)
+        ret_metrics["st_dev"] = str(deviation)
 
         return EvaluateRes(status=Status(code=Code.OK,
                                          message="OK"),
@@ -278,9 +294,6 @@ def main() -> None:
                        domain=domain,
                        batch_size=args.batch_size_train,
                        num_workers=args.num_workers,
-                       # train_transforms=transform_train,
-                       # test_transforms=transform_test,
-                       #pre_split=True,
                        drop_last=True,
                        shuffle=False)  # do not shuffle data for self supervised label discovery
 

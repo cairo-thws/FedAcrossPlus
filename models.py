@@ -70,7 +70,7 @@ class DataModelBase(pl.LightningModule):
         super().__init__()
         # training dataset mean
         self.training_dataset_mean = None
-        #self.save_hyperparameters()
+        self.input_shape = None
 
     def set_training_dataset_mean(self, mean_tensor):
         self.training_dataset_mean = mean_tensor
@@ -117,15 +117,22 @@ class ServerDataModel(DataModelBase):
         self.val_acc = Accuracy(task="multiclass", num_classes=num_classes, top_k=1)
         self.test_acc = Accuracy(task="multiclass", num_classes=num_classes, top_k=1)
 
-        # print the model summary
-        # summary(classifier, input_size=(3, 224, 224))
-        #summary(self.model, input_size=(3, 224, 224))
-
-    #def training_epoch_end(self, outputs):
-        #  the function is called after every epoch is completed
-        #if self.current_epoch == 1:
-            #sampleImg = torch.rand((1, 3, 224, 224))
-            #self.logger.experiment.add_graph(self, sampleImg)
+    def training_epoch_end(self, outputs):
+        #  the function is called after every epoch is completed, we log the graph only once
+        if self.current_epoch == 0:
+            # check if shape is set, try dummy otherwise
+            if self.input_shape:
+                sampleImg = torch.rand((self.input_shape[0],
+                                        self.input_shape[1],
+                                        self.input_shape[2],
+                                        self.input_shape[3]))
+            else:
+                sampleImg = torch.rand((64, 3, 224, 224))
+            # move to model device
+            sampleImg = sampleImg.to(self.device)
+            # fetch logger and add graph
+            tensorboard_logger = self.logger.experiment
+            tensorboard_logger.add_graph(model=self, input_to_model=sampleImg)
 
     def on_train_start(self):
         """Called at the beginning of training after sanity check."""
@@ -133,6 +140,9 @@ class ServerDataModel(DataModelBase):
 
     def training_step(self, train_batch, batch_idx):
         data, labels = train_batch
+        # track model input shape for creating the graph histogram
+        if not self.input_shape:
+            self.input_shape = data.shape
         _, predictions = self(data)
         #logits = nn.Softmax(dim=1)(predictions)
         classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
@@ -147,7 +157,6 @@ class ServerDataModel(DataModelBase):
     def validation_step(self, train_batch, batch_idx):
         data, labels = train_batch
         _, predictions = self(data)
-        #logits = nn.Softmax(dim=1)(predictions)
         _, predict = torch.max(predictions, 1)
         self.val_acc(predict, labels.squeeze())
         self.log("val_acc", self.val_acc)
@@ -188,9 +197,9 @@ class ClientDataModel(DataModelBase):
         for param in self.model.backbone.parameters():
             param.requires_grad = False
         for param in self.model.bottleneck.parameters():
-            param.requires_grad = False
-        for param in self.model.head.parameters():
             param.requires_grad = True
+        for param in self.model.head.parameters():
+            param.requires_grad = False
 
     def configure_optimizers(self):
         params = [{"params": self.model.get_parameters(target_adaptation=True), "lr_mult": 1.}]
@@ -207,23 +216,17 @@ class ClientDataModel(DataModelBase):
         self.dataset_mean_source = mean.to(self.device)
 
     def training_step(self, train_batch, batch_idx):
-        mean_support_features = []
-        for category in train_batch:
-            data = train_batch[category][0]
-            label = train_batch[category][1]
-            f, _ = self(data)
-            mean_support_features.append(torch.mean(f, dim=0))
-        mean_features = torch.stack(mean_support_features, 0)
-        #refined_f, _ = self.attention(mean_features, mean_features, mean_features)
-        #distance = torch.nn.PairwiseDistance(p=2)(refined_f, self.class_prototypes_source).mean(0)
-        print("Done")
-        #logits = nn.Softmax(dim=1)(predictions)
-        #classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
-                                                  #epsilon=self.hparams.epsilon,
-                                                  #use_gpu=self.device == "cuda")(predictions, labels)
-        #self.log("classifier_loss", classifier_loss)
-        #lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
-                     #max_iter=self.trainer.estimated_stepping_batches)
+        data, labels = train_batch
+        # track model input shape for creating the graph histogram
+        if not self.input_shape:
+            self.input_shape = data.shape
+        _, predictions = self(data)
+        # logits = nn.Softmax(dim=1)(predictions)
+        classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
+                                                  epsilon=self.hparams.epsilon,
+                                                  use_gpu=self.device == "cuda")(predictions, labels)
+        self.log("classifier_loss", classifier_loss)
+        lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
+                     max_iter=self.trainer.estimated_stepping_batches)
         # return train loss
-        return {}
-        #return {'loss': distance}
+        return {'loss': classifier_loss}

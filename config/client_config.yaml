@@ -1,0 +1,14 @@
+#client_id: 1
+fast_dev_run: "False"
+net: "resnet34"
+num_workers: 6
+max_epochs: 50
+dataset_path: "data/"
+batch_size_train: 32
+batch_size_test: 32
+log_every_n_steps: 1
+precision: 16
+accelerator: "gpu"
+devices: "1"
+dataset: "office31"
+check_val_every_n_epoch: 10

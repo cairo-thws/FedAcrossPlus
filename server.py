@@ -5,10 +5,12 @@ import signal
 import torch
 import statistics
 
-from argparse import ArgumentParser
-
 # TorchVision
 import pytorch_lightning
+import torchvision.transforms
+
+# config file parser
+from jsonargparse import ActionConfigFile
 
 # Flower framework
 from flwr.server import start_server, ServerConfig
@@ -18,6 +20,7 @@ from flwr.common import ndarrays_to_parameters
 from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
+from pytorch_lightning.cli import LightningArgumentParser
 
 # LightningFlower
 #import officeHome.image_source
@@ -26,7 +29,8 @@ from lightningflower.server import LightningFlowerServer
 from lightningflower.data import LightningFlowerData
 
 # lightningdata wrappers
-from lightningdata.modules.domain_adaptation.office31_datamodule import Office31DataModule
+from lightningdata import Digit5DataModule, OfficeHomeDataModule, Office31DataModule
+from lightningdata.modules.domain_adaptation.domainNet_datamodule import DomainNetDataModule
 
 # project imports
 from torch.utils.data import Subset, DataLoader
@@ -181,12 +185,14 @@ def evaluate_server_model(model, datamodule, trainer_args):
 
 def get_source_train_augmentation():
     """ Train data augmentation on source data here"""
-    pass
+    print("[SERVER] Source training augmentation")
+    return common.base_augmentation()
 
 
 def get_source_test_augmentation():
     """ Test data augmentation on source data here"""
-    pass
+    print("[SERVER] Source test augmentation")
+    return common.no_augmentation()
 
 
 def evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean=None):
@@ -206,7 +212,7 @@ def evaluate_server_prototypes(best_source_model, best_source_protos, source_dm,
 
 
 def main() -> None:
-    parser = ArgumentParser()
+    parser = LightningArgumentParser()
     # project-specific arguments
     parser = add_project_specific_args(parser)
     # Data-specific arguments
@@ -217,30 +223,44 @@ def main() -> None:
     parser = Trainer.add_argparse_args(parser)
     # strategy-specific arguments
     parser = ProtoFewShotPlusStrategy.add_strategy_specific_args(parser)
-    # parse args
-    args = parser.parse_args()
+    # add parsing from config file
+    parser.add_argument('--config_file', action=ActionConfigFile)
+    # parse arguments, skip checks
+    args = parser.parse_args(_skip_check=True)
 
     # SEED everything
     pytorch_lightning.seed_everything(seed=42)
 
     # PREPARE SOURCE DATASET
-    dataset = Office31DataModule
+    if args.dataset == Office31DataModule.get_dataset_name():
+        dataset = Office31DataModule
+        num_classes = 31
+    elif args.dataset == OfficeHomeDataModule.get_dataset_name():
+        dataset = OfficeHomeDataModule
+        num_classes = 65
+    elif args.dataset == Digit5DataModule.get_dataset_name():
+        dataset = Digit5DataModule
+        num_classes = 10
+    elif args.dataset == DomainNetDataModule.get_dataset_name():
+        dataset = DomainNetDataModule
+        num_classes = 345
+
     # the first domain is server source domain
     source_idx = 0
     domain = dataset.get_domain_names()[source_idx]
-    transform_train = get_source_train_augmentation()
-    transform_test = get_source_test_augmentation()
     source_dm = dataset(data_dir=args.dataset_path,
                         domain=domain,
                         batch_size=args.batch_size_train,
                         num_workers=args.num_workers,
+                        train_transform_fn=get_source_train_augmentation(),
+                        test_transform_fn=get_source_test_augmentation(),
                         shuffle=True
                         )
 
     best_source_model = None
-    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_" + str(source_idx) + ".pt")
-    path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_" + str(source_idx) + "_protos.pt")
-    path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_" + str(source_idx) + "_mean.pt")
+    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(source_idx) + ".pt")
+    path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(source_idx) + "_protos.pt")
+    path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(source_idx) + "_mean.pt")
     model_file_exists = os.path.exists(path_to_file)
 
     # pre-train the model on plain source data
@@ -248,7 +268,7 @@ def main() -> None:
         if not model_file_exists:
             print("[SERVER] Train and test pretrained source model and create prototypes")
             source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
-                                                            num_classes=31,
+                                                            num_classes=num_classes,
                                                             lr=Defaults.SERVER_LR,
                                                             momentum=Defaults.SERVER_LR_MOMENTUM,
                                                             gamma=Defaults.SERVER_LR_GAMMA,
@@ -279,7 +299,7 @@ def main() -> None:
         else:
             print("[SERVER] Load and test pretrained source model and create prototypes on demand")
             best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
-                                                                 num_classes=31,
+                                                                 num_classes=num_classes,
                                                                  lr=Defaults.SERVER_LR,
                                                                  momentum=Defaults.SERVER_LR_MOMENTUM,
                                                                  gamma=Defaults.SERVER_LR_GAMMA,
@@ -312,11 +332,13 @@ def main() -> None:
         # evaluation
         source_dm.prepare_data()
         source_dm.setup()
-        evaluate_server_model(best_source_model, source_dm, args)
+        # check if fast server startup is enabled
+        if not args.fast_server_startup:
+            evaluate_server_model(best_source_model, source_dm, args)
     elif model_file_exists:
         print("[SERVER] Load and test pretrained source model")
         best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
-                                                             num_classes=31,
+                                                             num_classes=num_classes,
                                                              lr=Defaults.SERVER_LR,
                                                              momentum=Defaults.SERVER_LR_MOMENTUM,
                                                              gamma=Defaults.SERVER_LR_GAMMA,
@@ -337,23 +359,27 @@ def main() -> None:
         dataset_mean = check_dataset_mean(best_source_model, path_to_mean_file, source_dm.train_dataloader())
         best_source_model.set_training_dataset_mean(dataset_mean)
 
-        # evaluation
-        evaluate_server_model(best_source_model, source_dm, args)
+        # check if fast server startup is enabled
+        if not args.fast_server_startup:
+            # evaluation
+            evaluate_server_model(best_source_model, source_dm, args)
     else:
         print("[SERVER]: Pretraining not activated and no pretrained model available, exiting ...")
         return
 
-    # evaluation of source prototypes on source test set without centering
-    evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, None)
-    # evaluation of source prototypes on source test set with centering
-    evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean)
+    # check if fast server startup is enabled
+    if not args.fast_server_startup:
+        # evaluation of source prototypes on source test set without centering
+        evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, None)
+        # evaluation of source prototypes on source test set with centering
+        evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean)
 
     # bring source model into server mode and wrap it into LF
     lightning_flower_server_model = LightningFlowerServerModel(model=best_source_model,
                                                                prototypes=best_source_protos,
                                                                prototype_classes=source_dm.classes,
                                                                source_dataset_mean=dataset_mean,
-                                                               name=Office31DataModule.get_dataset_name() + "_model",
+                                                               name=dataset.get_dataset_name() + "_model",
                                                                strict_params=True)
     # release memory of source data
     del source_dm
@@ -367,7 +393,7 @@ def main() -> None:
     server = LightningFlowerServer(strategy=strategy)
 
     # Server config
-    server_config = ServerConfig(num_rounds=args.num_rounds, round_timeout=300.0)
+    server_config = ServerConfig(num_rounds=args.num_rounds, round_timeout=500.0)
 
     try:
         # Start Lightning Flower server for three rounds of federated learning
@@ -400,7 +426,6 @@ if __name__ == "__main__":
 
 """
 # cluster 1 gpu setup
---fast_dev_run=False --net="resnet34" --num_workers=6 --dataset_path="data/" --batch_size_train=128 --batch_size_test=128 --pretrain=False --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --accelerator="gpu" --devices=1 --max_epochs=50 --log_every_n_steps=1 --host_address="localhost:8080
-# CPU-only setup
+--fast_dev_run=False --net="resnet34" --num_workers=6 --dataset_path="data/" --batch_size_train=128 --batch_size_test=64 --pretrain=True --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --accelerator="gpu" --devices=1 --max_epochs=100 --log_every_n_steps=1 --N=65 --K=5 --adaptation_type="end_2_end" --precision=16 --dataset="officeHome" --check_val_every_n_epoch=5# CPU-only setup
 --fast_dev_run=False --net="resnet34" --num_workers=6 --dataset_path="data/" --batch_size_train=32 --batch_size_test=32 --pretrain=False --num_rounds=3 --min_fit_clients=1 --min_available_clients=1 --min_eval_clients=1 --max_epochs=50 --log_every_n_steps=1
 """

@@ -1,23 +1,24 @@
 import gc
 import os
 import random
+import signal
 import statistics
 import torch
-import signal
+import timeit
 
-# Argument parser
-from argparse import ArgumentParser
-
-# TorchVision
-from flwr.common import FitRes, FitIns, GetPropertiesRes, GetPropertiesIns, GetParametersIns, GetParametersRes, parameters_to_ndarrays
+# config file parser
+from jsonargparse import ActionConfigFile
 
 # flower framework
 from flwr.client import start_client
 from flwr.common.typing import Code, Parameters, Status, EvaluateIns, EvaluateRes
+from flwr.common import FitRes, FitIns, GetPropertiesRes, GetPropertiesIns, GetParametersIns, GetParametersRes, parameters_to_ndarrays
 
 # pytorch lightning
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything, Trainer
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
+from pytorch_lightning.cli import LightningArgumentParser
 
 # lightningflower framework imports
 from lightningflower.client import LightningFlowerClient
@@ -25,17 +26,17 @@ from lightningflower.data import LightningFlowerData
 from lightningflower.model import LightningFlowerModel
 
 # lightningdata wrappers
-from lightningdata.modules.domain_adaptation.office31_datamodule import Office31DataModule
-# from lightningdata.common.pre_process import ResizeImage
+from lightningdata import Digit5DataModule, Office31DataModule, OfficeHomeDataModule
+from lightningdata.modules.domain_adaptation.domainNet_datamodule import DomainNetDataModule
+
+from torch.utils.data import Subset, DataLoader
 
 # project imports
 import common
-from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes, create_fewshot_loaders, \
+from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes_on_client, create_reduced_fewshot_loaders, \
     parse_network_type, NetworkType, ClientAdaptationType, Defaults, parse_adaptation_type
+from models import ClientDataModel
 
-from models import ClientDataModel, ServerDataModel
-
-import timeit
 
 """
 If you get an error like: “failed to connect to all addresses” “grpc_status”:14 
@@ -132,18 +133,42 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
 
     def generate_base_dataloaders(self):
         """Generates query and support sets according to the N/K parameters"""
-
-        # check if the dataloaders are already set
-        if self.loaders:
-            return
-
-        self.loaders = create_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
+        if not self.loaders:
+            self.loaders = create_reduced_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
 
         print("[CLIENT " + str(self.c_id) + "] Query and support sets generated")
 
-    def prototypes_adaptation(self, adaptation_type=ClientAdaptationType.MEAN_EMBEDDING):
+    def finetune_model(self, trainer_config, train_loader, val_loader=None, create_prototypes=True):
+        # Init ModelCheckpoint callback, monitoring "val_loss"
+        #checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True, mode="max")
+        early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.001, patience=20, verbose=True,
+                                                mode="min")
+        lr_monitor = LearningRateMonitor(logging_interval='step')
+        # create new trainer instance for client adaptation
+        trainer = Trainer.from_argparse_args(trainer_config, callbacks=[early_stopping_callback, lr_monitor], deterministic=True)
+        # start training with limited examples
+        trainer.fit(self.localModel.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        if create_prototypes:
+            # move model back on device
+            self.localModel.model = self.localModel.model.to(DEVICE)
+            with torch.no_grad():
+                self.localModel.model.eval()
+                protos = []
+                for cat in self.episodic_categories:
+                    # idx_subset = train_set.labels_to_idx[i]
+                    idx_subset = [j for j, (_, y) in enumerate(train_loader.dataset) if y == cat]
+                    subset = Subset(train_loader.dataset, idx_subset)
+                    dataloader = DataLoader(subset, batch_size=len(idx_subset))
+                    for data, labels in dataloader:
+                        data = data.to(DEVICE)
+                        f, _ = self.localModel.model(data)
+                        protos.append(torch.mean(f, dim=0))
+                prototypes = torch.stack(protos, 0)
+                return trainer.logged_metrics, prototypes.detach().clone()
+        return trainer.logged_metrics, None
+
+    def prototypes_adaptation(self, adaptation_type=ClientAdaptationType.END_2_END):
         print("[CLIENT " + str(self.c_id) + "] Adapt global prototypes to target samples")
-        prototypes = None
         if ClientAdaptationType.MEAN_EMBEDDING == adaptation_type:
             print("[CLIENT " + str(self.c_id) + "] Prototype creation using mean embedding vector of target samples")
             with torch.no_grad():
@@ -155,28 +180,16 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
                         f, _ = self.localModel.model(data)
                         protos.append(torch.mean(f, dim=0))
                 prototypes = torch.stack(protos, 0)
-            self.tuned_prototypes = prototypes.detach().clone()
-            return
-        elif ClientAdaptationType.CENTERED_MEAN_EMBEDDING == adaptation_type:
-            # create new trainer instance for this federated learning round
-            trainer = Trainer.from_argparse_args(self.trainer_config)
+            return dict(), prototypes.detach().clone()
+        elif ClientAdaptationType.END_2_END == adaptation_type:
             # overwrite class level prototypes
             self.localModel.model.set_class_prototypes(self.prototypes[self.episodic_categories])
             # set source dataset mean
             self.localModel.model.set_source_dataset_mean(self.source_dataset_mean[self.episodic_categories])
-
-            for episode in range(self.training_episodes):
-                print("[CLIENT " + str(self.c_id) + "] Training episode " + str(episode))
-                # resample from target images
-                self.loaders = create_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
-                # train
-                trainer.fit(self.localModel.model, self.loaders[0]) #pass only support data
-            # TODO: get adapted prototypes here
-            # self.tuned_prototypes = prototypes.detach().clone()
-        else:
-            # set current source prototype as target prototypes, no adaptation
-            self.tuned_prototypes = self.prototypes.detach().clone()
-        return
+            # resample from target images
+            self.loaders = common.create_reduced_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
+            # fine tune model on few examples
+            return self.finetune_model(self.trainer_config, self.loaders[0], self.loaders[2], create_prototypes=True)
 
     def evaluate_client_model(self):
         total_acc = list()
@@ -184,9 +197,7 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         print("[CLIENT " + str(self.c_id) + "] Calculating mean few-shot accuracy of class prototypes on target test data over " + str(
             test_queries) + " runs... ")
         for i in range(test_queries):
-            episodic_categories = random.sample(range(0, self.datamodule.num_classes), self.N)
-            test_loaders = common.create_fewshot_loaders(self.datamodule, episodic_categories, self.K)
-            acc = test_prototypes(self.localModel.model, self.tuned_prototypes[episodic_categories], test_loaders, DEVICE, network_type=NetworkType.PROTOTYPICAL, dataset_mean=self.source_dataset_mean)
+            acc = test_prototypes_on_client(self.localModel.model, self.tuned_prototypes, self.episodic_categories, self.loaders[1], DEVICE, network_type=NetworkType.PROTOTYPICAL, dataset_mean=self.source_dataset_mean)
             total_acc.append(acc)
         total_mean = statistics.mean(total_acc)
         total_stdev = statistics.stdev(total_acc)
@@ -219,19 +230,19 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         self.check_fitIns(ins)
         self.generate_base_dataloaders()
 
-        #best_episodic_prototypes, best_model = self.prototypes, self.model#self.train_episodic_prototypes()
-        self.prototypes_adaptation(self.adaptation_type)
+        # perform end to end local client training
+        adaptation_metrics, client_prototypes = self.prototypes_adaptation(self.adaptation_type)
 
-        if not self.adaptation_type == ClientAdaptationType.NONE:
-            acc = test_prototypes(self.localModel.model, self.tuned_prototypes, self.loaders, DEVICE,
-                                  network_type=NetworkType.PROTOTYPICAL)
-            print("[CLIENT " + str(self.c_id) + "] Accuracy on query categories using target prototype= " + str(acc))
+        # persist new prototypes
+        self.tuned_prototypes = client_prototypes
 
+        # return metrics
         ret_status = Status(code=Code.OK, message="OK")
         ret_params = Parameters(tensor_type="", tensors=[])
         ret_metrics = dict()
         ret_metrics["duration"] = timeit.default_timer() - fit_begin
         ret_metrics["client_id"] = self.c_id
+        ret_metrics["classifier_loss"] = adaptation_metrics["classifier_loss"].item()
 
         return FitRes(status=ret_status,
                       parameters=ret_params,
@@ -243,6 +254,7 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         eval_begin = timeit.default_timer()
 
         self.check_evalIns(ins)
+        self.generate_base_dataloaders()
         mean_acc, deviation = self.evaluate_client_model()
 
         ret_metrics = dict()
@@ -258,16 +270,18 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
                            metrics=ret_metrics)
 
 
-def get_client_train_augmentation():
-    pass
+def get_client_train_augmentation(client_id, input_image_size=224, normalize=False):
+    print("[CLIENT] Client " + str(client_id) + " - Client training augmentation")
+    return common.boost_augmentation(resize_size=input_image_size, resnet_normalization=normalize)
 
 
-def get_client_test_augmentation():
-    pass
+def get_client_test_augmentation(client_id, input_image_size=224, normalize=False):
+    print("[CLIENT] Client " + str(client_id) + " - No client test augmentation")
+    return common.no_augmentation(resize_size=input_image_size, resnet_normalization=normalize)
 
 
 def main() -> None:
-    parser = ArgumentParser()
+    parser = LightningArgumentParser()
     # paper-specific arguments
     parser = add_project_specific_args(parser)
     # Data-specific arguments
@@ -276,29 +290,43 @@ def main() -> None:
     parser = pl.Trainer.add_argparse_args(parser)
     # Client-specific arguments
     parser = LightningFlowerClient.add_client_specific_args(parser)
-    args = parser.parse_args()
+    # add parsing from config file
+    parser.add_argument('--config_file', action=ActionConfigFile)
+    # parse arguments, skip checks
+    args = parser.parse_args(_skip_check=True)
 
     # fixed seeding
     seed_everything(42, workers=True)
 
-    # select dataset
-    dataset = Office31DataModule
+    # PREPARE SOURCE DATASET
+    if args.dataset == Office31DataModule.get_dataset_name():
+        dataset = Office31DataModule
+        num_classes = 31
+    elif args.dataset == OfficeHomeDataModule.get_dataset_name():
+        dataset = OfficeHomeDataModule
+        num_classes = 65
+    elif args.dataset == Digit5DataModule.get_dataset_name():
+        dataset = Digit5DataModule
+        num_classes = 10
+    elif args.dataset == DomainNetDataModule.get_dataset_name():
+        dataset = DomainNetDataModule
+        num_classes = 345
 
     # limit client id number
     client_id = args.client_id % len(dataset.get_domain_names())
     # client ids start with 1, 0 is reserved for server
     domain = dataset.get_domain_names()[client_id]
-    transform_train = get_client_train_augmentation()
-    transform_test = get_client_test_augmentation()
     dm_train = dataset(data_dir=args.dataset_path,
                        domain=domain,
                        batch_size=args.batch_size_train,
                        num_workers=args.num_workers,
                        drop_last=True,
-                       shuffle=False)  # do not shuffle data for self supervised label discovery
+                       train_transform_fn=get_client_train_augmentation(client_id, normalize=True),
+                       test_transform_fn=get_client_test_augmentation(client_id, normalize=True),
+                       shuffle=False)
 
     # load pretrained server model
-    path_to_file = os.path.join("data", "pretrained",  args.net + "_" + str(Office31DataModule.get_dataset_name()) + ".pt")
+    path_to_file = os.path.join("data", "pretrained",  args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_0.pt")
     model_file_exists = os.path.exists(path_to_file)
     if model_file_exists:
         server_model = common.create_empty_server_model(name=str(dm_train.get_dataset_name()),
@@ -310,24 +338,28 @@ def main() -> None:
                                                         epsilon=Defaults.SERVER_LOSS_EPSILON,
                                                         net=args.net,
                                                         pretrain=False)
+        # move server model to device
         server_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
-        pretrained_model = server_model.model#.to(DEVICE)
-        client_data_model = ClientDataModel(pretrained_model=pretrained_model)
+        # remove server part, extract internal model
+        pretrained_model = server_model.model
+        # wrap into client model
+        client_data_model = ClientDataModel(server_model.hparams_initial, pretrained_model=pretrained_model)
+        # make sure client model is on device
         client_data_model = client_data_model.to(DEVICE)
+        # wrap into LightingFlower model that is compatible with federated learning framework
         client_model = LightningFlowerModel(model=client_data_model,
                                             name=Office31DataModule.get_dataset_name() + "_client_model",
                                             strict_params=True)
         # free some memory
+        # @todo check if more memory can be freed
         del server_model
-        #del pretrained_model
         gc.collect()
 
-        # prepare datamodule, overwrite presplit setting
-        #dm_train.pre_split = True
+        # prepare datamodule manually(PL usually takes care)
         dm_train.prepare_data()
         dm_train.setup()
 
-        # Start Flower client
+        # start flwr client
         try:
             start_client(server_address=args.host_address,
                          client=ProtoFewShotPlusClient(model=client_model,
@@ -359,3 +391,12 @@ if __name__ == "__main__":
     # clear cuda cache
     torch.cuda.empty_cache()
     print("[CLIENT] Graceful shutdown")
+
+
+
+"""
+# client 1 gpu setup
+--fast_dev_run=False --net="resnet34" --num_workers=4 --max_epochs=50 --dataset_path="data/" --batch_size_train=32 --batch_size_test=32 --log_every_n_steps=1 --client_id=1 --precision=16 --accelerator="gpu" --devices=1 --dataset="officeHome" --check_val_every_n_epoch=10
+# client 2 gpu setup
+--fast_dev_run=False --net="resnet34" --num_workers=4 --max_epochs=50 --dataset_path="data/" --batch_size_train=32 --batch_size_test=32 --log_every_n_steps=1 --client_id=2 --precision=16 --accelerator="gpu" --devices=1 --dataset="officeHome" --check_val_every_n_epoch=10
+"""

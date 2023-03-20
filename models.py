@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torch.optim as optim
+from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import Subset, DataLoader
 from torchmetrics import Accuracy
 import resnet as backbones
@@ -114,8 +115,8 @@ class ServerDataModel(DataModelBase):
             param.requires_grad = True
 
         # initialize accuracy tracker for a multiclass prediction task
-        self.val_acc = Accuracy(task="multiclass", num_classes=num_classes, top_k=1)
-        self.test_acc = Accuracy(task="multiclass", num_classes=num_classes, top_k=1)
+        self.val_acc = Accuracy(task="multiclass", num_classes=self.hparams.num_classes, top_k=1)
+        self.test_acc = Accuracy(task="multiclass", num_classes=self.hparams.num_classes, top_k=1)
 
     def training_epoch_end(self, outputs):
         #  the function is called after every epoch is completed, we log the graph only once
@@ -170,8 +171,8 @@ class ServerDataModel(DataModelBase):
         _, predict = torch.max(predictions, 1)
         self.test_acc(predict, labels.squeeze())
         self.log("test_acc", self.test_acc)
-        # return validation accuracy
-        return {'val_acc': self.test_acc}
+        # return test accuracy
+        return {'test_acc': self.test_acc}
 
     def configure_optimizers(self):
         param_group = self.model.get_parameters()
@@ -183,7 +184,7 @@ class ServerDataModel(DataModelBase):
 
 
 class ClientDataModel(DataModelBase):
-    def __init__(self, pretrained_model=None):
+    def __init__(self, args, pretrained_model=None):
         super().__init__()
         self.model = pretrained_model
         self.class_prototypes_source = None
@@ -201,10 +202,15 @@ class ClientDataModel(DataModelBase):
         for param in self.model.head.parameters():
             param.requires_grad = False
 
+        # initialize accuracy tracker for a multiclass prediction task
+        self.val_acc = Accuracy(task="multiclass", num_classes=self.hparams.args.num_classes, top_k=1)
+        self.test_acc = Accuracy(task="multiclass", num_classes=self.hparams.args.num_classes, top_k=1)
+
     def configure_optimizers(self):
-        params = [{"params": self.model.get_parameters(target_adaptation=True), "lr_mult": 1.}]
+        param_group = self.model.get_parameters(target_adaptation=True)
         # create optimizer with parameter group
-        optimizer = optim.SGD(params=params, lr=self.hparams.args.lr, momentum=self.hparams.args.momentum, weight_decay=self.hparams.args.weight_decay, nesterov=True)
+        optimizer = optim.SGD(params=param_group, lr=self.hparams.args.lr, momentum=self.hparams.args.momentum,
+                              weight_decay=self.hparams.args.weight_decay, nesterov=True)
         #lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=1, gamma=self.hparams.gamma)
         optimizer = op_copy(optimizer)
         return optimizer
@@ -215,6 +221,24 @@ class ClientDataModel(DataModelBase):
     def set_source_dataset_mean(self, mean):
         self.dataset_mean_source = mean.to(self.device)
 
+    def log_tb_images(self, viz_batch, batch_idx) -> None:
+
+        # Get tensorboard logger
+        tb_logger = None
+        for logger in self.trainer.loggers:
+            if isinstance(logger, TensorBoardLogger):
+                tb_logger = logger.experiment
+                break
+
+        if tb_logger is None:
+            raise ValueError('TensorBoard Logger not found')
+
+            # Log the images (Give them different names)
+        for img_idx, (image, y_true, y_pred) in enumerate(zip(*viz_batch)):
+            tb_logger.add_image(f"Image/{batch_idx}_{img_idx}", image, 0, dataformats='CHW')
+            #tb_logger.add_image(f"GroundTruth/{batch_idx}_{img_idx}", y_true, 0, dataformats='CHW')
+            #tb_logger.add_image(f"Prediction/{batch_idx}_{img_idx}", y_pred, 0, dataformats='CHW')
+
     def training_step(self, train_batch, batch_idx):
         data, labels = train_batch
         # track model input shape for creating the graph histogram
@@ -222,11 +246,33 @@ class ClientDataModel(DataModelBase):
             self.input_shape = data.shape
         _, predictions = self(data)
         # logits = nn.Softmax(dim=1)(predictions)
-        classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
-                                                  epsilon=self.hparams.epsilon,
+        classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.args.num_classes,
+                                                  epsilon=self.hparams.args.epsilon,
                                                   use_gpu=self.device == "cuda")(predictions, labels)
         self.log("classifier_loss", classifier_loss)
         lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
                      max_iter=self.trainer.estimated_stepping_batches)
         # return train loss
         return {'loss': classifier_loss}
+
+    def validation_step(self, train_batch, batch_idx):
+        data, labels = train_batch
+        _, predictions = self(data)
+        _, predict = torch.max(predictions, 1)
+        self.val_acc(predict, labels.squeeze())
+        self.log("val_acc", self.val_acc)
+        # log validation images
+        if batch_idx % 10:  # Log every 10 batches
+            self.log_tb_images((data, labels, predict), batch_idx)
+        # return validation accuracy
+        return {'val_acc': self.val_acc}
+
+    def test_step(self, test_batch, batch_idx):
+        data, labels = test_batch
+        _, predictions = self(data)
+        #logits = nn.Softmax(dim=1)(predictions)
+        _, predict = torch.max(predictions, 1)
+        self.test_acc(predict, labels.squeeze())
+        self.log("test_acc", self.test_acc)
+        # return test accuracy
+        return {'test_acc': self.test_acc}

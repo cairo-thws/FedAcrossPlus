@@ -133,8 +133,9 @@ class ProtoFewShotPlusStrategy(LightningFlowerBaseStrategy, FedAvg):
         for (client, fit_res) in results:
             client_id = fit_res.metrics["client_id"]
             duration = fit_res.metrics["duration"]
+            classifier_loss = fit_res.metrics["classifier_loss"]
             status = fit_res.status
-            print("[STRATEGY] Client " + str(client_id) + " returned result message= " + status.message + " with duration " + str(duration))
+            print("[STRATEGY] Client " + str(client_id) + " returned result message= " + status.message + " with duration " + str(duration) + " and classifier_loss=" + str(classifier_loss))
 
         return None, {}
 

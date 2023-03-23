@@ -11,6 +11,7 @@ import torchvision.transforms
 
 # config file parser
 from jsonargparse import ActionConfigFile
+import pprint
 
 # Flower framework
 from flwr.server import start_server, ServerConfig
@@ -37,9 +38,10 @@ from torch.utils.data import Subset, DataLoader
 
 import common
 from strategy import ProtoFewShotPlusStrategy
-from common import add_project_specific_args, signal_handler_free_cuda, Defaults, test_prototypes, NetworkType
+from common import add_project_specific_args, signal_handler_free_cuda, Defaults, test_prototypes, NetworkType, LogParameters
 from models import ServerDataModel
 
+pp = pprint.PrettyPrinter(indent=4)
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:2"
 os.environ["GRPC_VERBOSITY"] = "debug"
@@ -82,17 +84,6 @@ class LightningFlowerServerModel(LightningFlowerModel):
     def get_dataset_mean(self):
         print("[SERVER] Providing converted ndarray source dataset mean to strategy")
         return self.source_dataset_mean.clone()
-
-    def get_flwr_params(self):
-        # get the weights
-        weights = [val.cpu().numpy() for key, val in self.model.state_dict().items()]
-        # global feature extractor weights
-        #weights = ([val.cpu().numpy() for key, val in self.model.feature_extractor.state_dict().items()])
-        # global classifier weights
-        #weights.extend([val.cpu().numpy() for key, val in self.model.global_classifier.state_dict().items()])
-        # source gmm weights
-        #weights.extend(self.model.source_gmm._get_parameters())
-        return None#weights_to_parameters(weights)
 
 
 def check_dataset_mean(model, path, dataloader):
@@ -144,17 +135,24 @@ def create_class_prototypes(model, data_loader: DataLoader):
     return class_prototypes.detach().clone()
 
 
-def pre_train_server_model(model, datamodule, trainer_args, source_idx, create_prototypes=False):
+def pre_train_server_model(model, datamodule, trainer_args, domain_name, create_prototypes=False):
     # Init ModelCheckpoint callback, monitoring "val_loss"
+    callback_list = list()
+    if trainer_args.log_parameters == 1:
+        logparams_callback = LogParameters()
+        callback_list.append(logparams_callback)
     checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True, mode="max")
+    callback_list.append(checkpoint_callback)
     early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.005, patience=5, verbose=True, mode="min")
+    callback_list.append(early_stopping_callback)
     lr_monitor = LearningRateMonitor(logging_interval='step')
-    trainer = Trainer.from_argparse_args(trainer_args, callbacks=[early_stopping_callback, checkpoint_callback, lr_monitor], deterministic=True)
+    callback_list.append(lr_monitor)
+    trainer = Trainer.from_argparse_args(trainer_args, callbacks=callback_list, deterministic=True)
     # check and create dirs if needed
     if not os.path.exists(os.path.join(trainer_args.dataset_path, "pretrained")):
         os.makedirs(os.path.join(trainer_args.dataset_path, "pretrained"))
-    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_" + source_idx + ".pt")
-    static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_" + source_idx + "_protos.pt")
+    static_pt_path_model = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_" + domain_name + "_model.pt")
+    static_pt_path_protos = os.path.join(trainer_args.dataset_path, "pretrained", trainer_args.net + "_" + datamodule.get_dataset_name() + "_" + domain_name + "_protos.pt")
 
     checkpoint_path = trainer_args.ckpt_path if trainer_args.ckpt_path != "" else None
     trainer.fit(model=model, datamodule=datamodule, ckpt_path=checkpoint_path)
@@ -227,6 +225,8 @@ def main() -> None:
     parser.add_argument('--config_file', action=ActionConfigFile)
     # parse arguments, skip checks
     args = parser.parse_args(_skip_check=True)
+    # print args to stdout
+    print(common.print_args(args))
 
     # SEED everything
     pytorch_lightning.seed_everything(seed=42)
@@ -246,7 +246,7 @@ def main() -> None:
         num_classes = 345
 
     # the first domain is server source domain
-    source_idx = 0
+    source_idx = args.subdomain_id
     domain = dataset.get_domain_names()[source_idx]
     source_dm = dataset(data_dir=args.dataset_path,
                         domain=domain,
@@ -258,16 +258,16 @@ def main() -> None:
                         )
 
     best_source_model = None
-    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(source_idx) + ".pt")
-    path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(source_idx) + "_protos.pt")
-    path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(source_idx) + "_mean.pt")
+    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_model.pt")
+    path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_protos.pt")
+    path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_mean.pt")
     model_file_exists = os.path.exists(path_to_file)
 
     # pre-train the model on plain source data
     if args.pretrain:
         if not model_file_exists:
-            print("[SERVER] Train and test pretrained source model and create prototypes")
-            source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
+            print("[SERVER] Train and test pretrained source model and create prototypes for dataset " + str(dataset.get_dataset_name()) + " under subdomain " + str(domain))
+            source_model = common.create_empty_server_model(name=str(dataset.get_dataset_name() + "_" + str(domain)),
                                                             num_classes=num_classes,
                                                             lr=Defaults.SERVER_LR,
                                                             momentum=Defaults.SERVER_LR_MOMENTUM,
@@ -275,6 +275,7 @@ def main() -> None:
                                                             weight_decay=Defaults.SERVER_LR_WD,
                                                             epsilon=Defaults.SERVER_LOSS_EPSILON,
                                                             net=args.net,
+                                                            optimizer=args.optimizer,
                                                             pretrain=True)
 
             # move source model to current device
@@ -288,7 +289,7 @@ def main() -> None:
             best_source_model, best_source_protos = pre_train_server_model(model=source_model,
                                                                            datamodule=source_dm,
                                                                            trainer_args=args,
-                                                                           source_idx=str(source_idx),
+                                                                           domain_name=str(domain),
                                                                            create_prototypes=True)
 
             # create dataset mean
@@ -298,7 +299,7 @@ def main() -> None:
             best_source_model.set_training_dataset_mean(dataset_mean)
         else:
             print("[SERVER] Load and test pretrained source model and create prototypes on demand")
-            best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
+            best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name() + "_" + str(domain)),
                                                                  num_classes=num_classes,
                                                                  lr=Defaults.SERVER_LR,
                                                                  momentum=Defaults.SERVER_LR_MOMENTUM,
@@ -306,6 +307,7 @@ def main() -> None:
                                                                  weight_decay=Defaults.SERVER_LR_WD,
                                                                  epsilon=Defaults.SERVER_LOSS_EPSILON,
                                                                  net=args.net,
+                                                                 optimizer=args.optimizer,
                                                                  pretrain=False)
             best_source_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
 
@@ -337,7 +339,7 @@ def main() -> None:
             evaluate_server_model(best_source_model, source_dm, args)
     elif model_file_exists:
         print("[SERVER] Load and test pretrained source model")
-        best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name()),
+        best_source_model = common.create_empty_server_model(name=str(source_dm.get_dataset_name() + "_" + str(domain)),
                                                              num_classes=num_classes,
                                                              lr=Defaults.SERVER_LR,
                                                              momentum=Defaults.SERVER_LR_MOMENTUM,
@@ -345,6 +347,7 @@ def main() -> None:
                                                              weight_decay=Defaults.SERVER_LR_WD,
                                                              epsilon=Defaults.SERVER_LOSS_EPSILON,
                                                              net=args.net,
+                                                             optimizer=args.optimizer,
                                                              pretrain=False)
         best_source_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
         best_source_protos = torch.load(path_to_protos, map_location=DEVICE)
@@ -379,7 +382,7 @@ def main() -> None:
                                                                prototypes=best_source_protos,
                                                                prototype_classes=source_dm.classes,
                                                                source_dataset_mean=dataset_mean,
-                                                               name=dataset.get_dataset_name() + "_model",
+                                                               name=str(dataset.get_dataset_name()) + "_" + str(domain) + "_lf_server_model",
                                                                strict_params=True)
     # release memory of source data
     del source_dm
@@ -393,7 +396,7 @@ def main() -> None:
     server = LightningFlowerServer(strategy=strategy)
 
     # Server config
-    server_config = ServerConfig(num_rounds=args.num_rounds, round_timeout=500.0)
+    server_config = ServerConfig(num_rounds=args.num_rounds, round_timeout=5000.0)
 
     try:
         # Start Lightning Flower server for three rounds of federated learning

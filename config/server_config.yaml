@@ -1,22 +1,40 @@
+# experimental setup
 N: 31
 K: 5
+
+# dataset specific
 dataset: "office31"
-net: "resnet34"
-fast_dev_run: "False"
-fast_server_startup: "True"
-num_workers: 4
+subdomain_id: 2
 dataset_path: "data/"
-batch_size_train: 128
-batch_size_test: 64
-pretrain: "False"
-num_rounds: 3
-min_fit_clients: 1
-min_available_clients: 1
-min_eval_clients: 1
+
+# model setup
+net: "resnet34"
+adaptation_type: "end_2_end"
+optimizer: "sgd"
+
+# hardware
 accelerator: "gpu"
 devices: "1"
-max_epochs: 100
+
+# federated training configuration
+pretrain: "False"
+fast_dev_run: "False"
+fast_server_startup: "True"
+num_workers: 6
+batch_size_train: 128
+batch_size_test: 64
+num_rounds: 1
+min_fit_clients: 2
+min_available_clients: 2
+min_eval_clients: 2
+max_epochs: 150
 log_every_n_steps: 1
-adaptation_type: "end_2_end"
 precision: 16
-check_val_every_n_epoch: 5
+check_val_every_n_epoch: 1
+
+# debugging/memory tracking
+#profiler: "pytorch"
+log_gpu_memory: "all"
+#track_grad_norm: "2"
+# requires patch to work on windows, remove dtype conversion in summary.py
+log_parameters: "0"

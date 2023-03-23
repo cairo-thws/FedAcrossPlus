@@ -17,7 +17,7 @@ from flwr.common import FitRes, FitIns, GetPropertiesRes, GetPropertiesIns, GetP
 # pytorch lightning
 import pytorch_lightning as pl
 from pytorch_lightning import seed_everything, Trainer
-from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor
+from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.cli import LightningArgumentParser
 
 # lightningflower framework imports
@@ -34,7 +34,7 @@ from torch.utils.data import Subset, DataLoader
 # project imports
 import common
 from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes_on_client, create_reduced_fewshot_loaders, \
-    parse_network_type, NetworkType, ClientAdaptationType, Defaults, parse_adaptation_type
+    parse_network_type, NetworkType, ClientAdaptationType, Defaults, parse_adaptation_type, LogParameters, print_args
 from models import ClientDataModel
 
 
@@ -81,6 +81,10 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         self.training_episodes = None
         self.network_type = None
         self.adaptation_type = None
+        self.local_trainer = None
+        self.local_loaders = None
+        # track the number of federated fit rounds
+        self.fed_round_fit = 0
 
         print("[CLIENT " + str(self.c_id) + "] Init ProtoFewShotPlusClient with id" + str(c_id))
 
@@ -138,14 +142,7 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
 
         print("[CLIENT " + str(self.c_id) + "] Query and support sets generated")
 
-    def finetune_model(self, trainer_config, train_loader, val_loader=None, create_prototypes=True):
-        # Init ModelCheckpoint callback, monitoring "val_loss"
-        #checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True, mode="max")
-        early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.001, patience=20, verbose=True,
-                                                mode="min")
-        lr_monitor = LearningRateMonitor(logging_interval='step')
-        # create new trainer instance for client adaptation
-        trainer = Trainer.from_argparse_args(trainer_config, callbacks=[early_stopping_callback, lr_monitor], deterministic=True)
+    def finetune_model(self, trainer, train_loader, val_loader=None, create_prototypes=True):
         # start training with limited examples
         trainer.fit(self.localModel.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
         if create_prototypes:
@@ -182,14 +179,33 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
                 prototypes = torch.stack(protos, 0)
             return dict(), prototypes.detach().clone()
         elif ClientAdaptationType.END_2_END == adaptation_type:
+            print("[CLIENT " + str(self.c_id) + "] End-to-End target adaptation")
             # overwrite class level prototypes
             self.localModel.model.set_class_prototypes(self.prototypes[self.episodic_categories])
             # set source dataset mean
             self.localModel.model.set_source_dataset_mean(self.source_dataset_mean[self.episodic_categories])
-            # resample from target images
-            self.loaders = common.create_reduced_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
+            if not self.local_loaders:
+                # resample from target images
+                self.local_loaders = common.create_reduced_fewshot_loaders(self.datamodule, self.episodic_categories, self.K)
+            if not self.local_trainer:
+                cb_list = list()
+                if self.trainer_config.log_parameters == 1:
+                    logparams_cb = LogParameters()
+                    cb_list.append(logparams_cb)
+                # Init ModelCheckpoint callback, monitoring "val_loss"
+                checkpoint_callback = ModelCheckpoint(monitor="val_acc", verbose=True, auto_insert_metric_name=True,
+                                                      mode="max")
+                #cb_list.append(checkpoint_callback)
+                early_stopping_callback = EarlyStopping(monitor="classifier_loss", min_delta=0.001, patience=20,
+                                                        verbose=True,
+                                                        mode="min")
+                cb_list.append(early_stopping_callback)
+                lr_monitor = LearningRateMonitor(logging_interval='step')
+                cb_list.append(lr_monitor)
+                # create new trainer instance for client adaptation
+                self.local_trainer = Trainer.from_argparse_args(self.trainer_config, callbacks=cb_list, deterministic=True)
             # fine tune model on few examples
-            return self.finetune_model(self.trainer_config, self.loaders[0], self.loaders[2], create_prototypes=True)
+            return self.finetune_model(self.local_trainer, self.loaders[0], self.loaders[2], create_prototypes=True)
 
     def evaluate_client_model(self):
         total_acc = list()
@@ -229,6 +245,9 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         # check new incoming parameters and configuration from server side
         self.check_fitIns(ins)
         self.generate_base_dataloaders()
+
+        # update local fit rounds tracker
+        self.fed_round_fit = self.fed_round_fit + 1
 
         # perform end to end local client training
         adaptation_metrics, client_prototypes = self.prototypes_adaptation(self.adaptation_type)
@@ -294,6 +313,8 @@ def main() -> None:
     parser.add_argument('--config_file', action=ActionConfigFile)
     # parse arguments, skip checks
     args = parser.parse_args(_skip_check=True)
+    # print args to stdout
+    print(common.print_args(args))
 
     # fixed seeding
     seed_everything(42, workers=True)
@@ -326,17 +347,18 @@ def main() -> None:
                        shuffle=False)
 
     # load pretrained server model
-    path_to_file = os.path.join("data", "pretrained",  args.net + "_" + str(Office31DataModule.get_dataset_name()) + "_0.pt")
+    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_model.pt")
     model_file_exists = os.path.exists(path_to_file)
     if model_file_exists:
-        server_model = common.create_empty_server_model(name=str(dm_train.get_dataset_name()),
-                                                        num_classes=31,
+        server_model = common.create_empty_server_model(name=str(dataset.get_dataset_name() + "_" + str(domain)),
+                                                        num_classes=num_classes,
                                                         lr=Defaults.SERVER_LR,
                                                         momentum=Defaults.SERVER_LR_MOMENTUM,
                                                         gamma=Defaults.SERVER_LR_GAMMA,
                                                         weight_decay=Defaults.SERVER_LR_WD,
                                                         epsilon=Defaults.SERVER_LOSS_EPSILON,
                                                         net=args.net,
+                                                        optimizer=args.optimizer,
                                                         pretrain=False)
         # move server model to device
         server_model.load_state_dict(torch.load(path_to_file, map_location=DEVICE))
@@ -348,7 +370,7 @@ def main() -> None:
         client_data_model = client_data_model.to(DEVICE)
         # wrap into LightingFlower model that is compatible with federated learning framework
         client_model = LightningFlowerModel(model=client_data_model,
-                                            name=Office31DataModule.get_dataset_name() + "_client_model",
+                                            name=str(dataset.get_dataset_name()) + "_" + str(domain) + "_lf_client_model",
                                             strict_params=True)
         # free some memory
         # @todo check if more memory can be freed

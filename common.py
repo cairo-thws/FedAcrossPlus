@@ -1,8 +1,15 @@
+import os
+import time
+
+import psutil
+
 import metric
 import random
 import sys
 import torch
-
+import pytorch_lightning as pl
+import platform
+import numpy as np
 from torch.utils.data import Subset, DataLoader
 from torchvision import transforms
 from lightningflower.utility import boolean_string
@@ -55,9 +62,12 @@ def add_project_specific_args(parent_parser):
     parser = parent_parser.add_argument_group("FedProtoShot")
     parser.add_argument("--net", type=str, default="resnet50")
     parser.add_argument("--pretrain", type=boolean_string, default=False)
+    parser.add_argument("--optimizer", type=str, default="sgd")
     parser.add_argument("--ckpt_path", type=str, default="")
     parser.add_argument("--fast_server_startup", default=False, type=boolean_string)
     parser.add_argument("--dataset", type=str, default="office31")
+    parser.add_argument("--subdomain_id", type=int, default=0)
+    parser.add_argument('--log_parameters', default=0, type=int)
     return parent_parser
 
 
@@ -305,7 +315,8 @@ def create_empty_server_model(name,
                               weight_decay,
                               epsilon,
                               net,
-                              pretrain):
+                              pretrain,
+                              optimizer):
     model = ServerDataModel(name=name,
                             num_classes=num_classes,
                             lr=lr,
@@ -314,7 +325,8 @@ def create_empty_server_model(name,
                             weight_decay=weight_decay,
                             epsilon=epsilon,
                             net=net,
-                            pretrain=pretrain)
+                            pretrain=pretrain,
+                            optimizer=optimizer)
     return model
 
 
@@ -357,3 +369,113 @@ def no_augmentation(resize_size=224, resnet_normalization=True, mean=[0.485, 0.4
     else:
         ret_transform = transforms.Compose([pre_process.ResizeImage(resize_size), transforms.ToTensor()])
     return ret_transform
+
+
+# from awesome pl collab
+class LogParameters(pl.Callback):
+    # weight and biases to tensorbard
+    def __init__(self):
+        super().__init__()
+
+    def on_fit_start(self, trainer, pl_module):
+        self.d_parameters = {}
+        for n, p in pl_module.named_parameters():
+            self.d_parameters[n] = []
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if not trainer.sanity_checking: # WARN: sanity_check is turned on by default
+            lp = []
+            for n, p in pl_module.named_parameters():
+                trainer.loggers[0].experiment.add_histogram(n, p.data, trainer.current_epoch)
+                # TODO add histogram to wandb too
+                self.d_parameters[n].append(p.ravel().cpu().numpy())
+                lp.append(p.ravel().cpu().numpy())
+            p = np.concatenate(lp)
+            trainer.loggers[0].experiment.add_histogram('Parameters', p, trainer.current_epoch)
+            # TODO add histogram to wandb too
+
+
+# https://raw.githubusercontent.com/PyTorchLightning/pytorch-lightning/master/requirements/collect_env_details.py
+
+def info_system():
+    return {
+        "OS": platform.system(),
+        "architecture": platform.architecture(),
+        "version": platform.version(),
+        "processor": platform.processor(),
+        "python": platform.python_version(),
+        "ram": psutil.virtual_memory().total,
+    }
+
+
+def info_cuda():
+    return {
+        "GPU": [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
+        # 'nvidia_driver': get_nvidia_driver_version(run_lambda),
+        "available": torch.cuda.is_available(),
+        "version": torch.version.cuda,
+    }
+
+
+def info_packages():
+    return {
+        "numpy": np.__version__,
+        "pyTorch_version": torch.__version__,
+        "pyTorch_debug": torch.version.debug,
+        "pytorch-lightning": pl.__version__,
+    }
+
+
+def nice_print(details, level=0):
+    LEVEL_OFFSET = "\t"
+    KEY_PADDING = 20
+    lines = []
+    for k in sorted(details):
+        key = f"* {k}:" if level == 0 else f"- {k}:"
+        if isinstance(details[k], dict):
+            lines += [level * LEVEL_OFFSET + key]
+            lines += nice_print(details[k], level + 1)
+        elif isinstance(details[k], (set, list, tuple)):
+            lines += [level * LEVEL_OFFSET + key]
+            lines += [(level + 1) * LEVEL_OFFSET + "- " + v for v in details[k]]
+        else:
+            template = "{:%is} {}" % KEY_PADDING
+            key_val = template.format(key, details[k])
+            lines += [(level * LEVEL_OFFSET) + key_val]
+    return lines
+
+
+def collect_env_details():
+    details = {"System": info_system(), "CUDA": info_cuda(), "Packages": info_packages()}
+    lines = nice_print(details)
+    text = os.linesep.join(lines)
+    return text
+
+
+class Log_and_print():
+    # need this to ensure that stuff are printed to STDOUT as well for backup
+    '''
+    https://stackoverflow.com/questions/45016458/tensorflow-tf-summary-text-and-linebreaks
+    Tensorboard text uses the markdown format.
+    That means you need to add 2 spaces before \n to produce a linebreak
+    '''
+
+    def __init__(self, tb_logger, wandb_logger, run_name):
+        self.tb_logger = tb_logger
+        self.wandb_logger = wandb_logger
+        self.run_name = run_name
+        self.str_log = ('PARTIAL COPY OF TEXT LOG TO TENSORBOARD TEXT  \n'
+                        'class Log_and_print() by Arian Prabowo  \n'
+                        'RUN NAME: ' + run_name + '  \n  \n')
+
+    def lnp(self, tag):
+        print(self.run_name, time.asctime(), tag)
+        self.str_log += str(time.asctime()) + ' ' + str(tag) + '  \n'
+
+    def dump_to_tensorboard(self):
+        self.tb_logger.experiment.add_text('log', self.str_log)
+
+    def dump_to_wandb(self):
+        # https://pytorch-lightning.readthedocs.io/en/stable/extensions/generated/pytorch_lightning.loggers.WandbLogger.html#pytorch_lightning.loggers.WandbLogger.experiment
+        # https://docs.wandb.ai/guides/track/log#summary-metrics
+        self.wandb_logger.experiment.summary['log'] = self.str_log

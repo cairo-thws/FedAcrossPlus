@@ -4,12 +4,11 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 import torch.optim as optim
 from pytorch_lightning.loggers import TensorBoardLogger
-from torch.utils.data import Subset, DataLoader
 from torchmetrics import Accuracy
 import resnet as backbones
 import classifier
-from torchsummary import summary
 
+LOG_INPUT_IMG_EVERY_N_BATCH = 20
 
 class CrossEntropyLabelSmooth(nn.Module):
     def __init__(self, num_classes, epsilon=0.1, use_gpu=True, size_average=True):
@@ -81,7 +80,7 @@ class DataModelBase(pl.LightningModule):
 
 
 class ServerDataModel(DataModelBase):
-    def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon, net="resnet50", pretrain=True):
+    def __init__(self, name, num_classes, lr, momentum, gamma, weight_decay, epsilon, optimizer="sgd", net="resnet50", pretrain=True):
         super().__init__()
 
         # make hyperparameter available via self.hparams
@@ -116,6 +115,7 @@ class ServerDataModel(DataModelBase):
 
         # initialize accuracy tracker for a multiclass prediction task
         self.val_acc = Accuracy(task="multiclass", num_classes=self.hparams.num_classes, top_k=1)
+        self.train_acc = Accuracy(task="multiclass", num_classes=self.hparams.num_classes, top_k=1)
         self.test_acc = Accuracy(task="multiclass", num_classes=self.hparams.num_classes, top_k=1)
 
     def training_epoch_end(self, outputs):
@@ -145,15 +145,19 @@ class ServerDataModel(DataModelBase):
         if not self.input_shape:
             self.input_shape = data.shape
         _, predictions = self(data)
-        #logits = nn.Softmax(dim=1)(predictions)
+        _, predict = torch.max(predictions, 1)
+        # update train accuracy
+        self.train_acc(predict, labels.squeeze())
+        # calculate classifier loss
         classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.num_classes,
                                                   epsilon=self.hparams.epsilon,
                                                   use_gpu=self.device == "cuda")(predictions, labels)
         self.log("classifier_loss", classifier_loss)
+        self.log("train_acc", self.train_acc)
         lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
                      max_iter=self.trainer.estimated_stepping_batches)
         # return train loss
-        return {'loss': classifier_loss}
+        return {'loss': classifier_loss, 'train_acc': self.train_acc}
 
     def validation_step(self, train_batch, batch_idx):
         data, labels = train_batch
@@ -167,7 +171,6 @@ class ServerDataModel(DataModelBase):
     def test_step(self, test_batch, batch_idx):
         data, labels = test_batch
         _, predictions = self(data)
-        #logits = nn.Softmax(dim=1)(predictions)
         _, predict = torch.max(predictions, 1)
         self.test_acc(predict, labels.squeeze())
         self.log("test_acc", self.test_acc)
@@ -177,7 +180,11 @@ class ServerDataModel(DataModelBase):
     def configure_optimizers(self):
         param_group = self.model.get_parameters()
         # create optimizer with parameter group
-        optimizer = optim.SGD(params=param_group, lr=self.hparams.lr, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay, nesterov=True)
+        if self.hparams.optimizer == "sgd":
+            optimizer = optim.SGD(params=param_group, lr=self.hparams.lr, momentum=self.hparams.momentum, weight_decay=self.hparams.weight_decay, nesterov=True)
+        elif self.hparams.optimizer == "adam":
+            optimizer = optim.Adam(params=param_group, lr=self.hparams.lr)
+
         #lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=1, gamma=self.hparams.gamma)
         optimizer = op_copy(optimizer)
         return optimizer
@@ -204,14 +211,17 @@ class ClientDataModel(DataModelBase):
 
         # initialize accuracy tracker for a multiclass prediction task
         self.val_acc = Accuracy(task="multiclass", num_classes=self.hparams.args.num_classes, top_k=1)
+        self.train_acc = Accuracy(task="multiclass", num_classes=self.hparams.args.num_classes, top_k=1)
         self.test_acc = Accuracy(task="multiclass", num_classes=self.hparams.args.num_classes, top_k=1)
 
     def configure_optimizers(self):
         param_group = self.model.get_parameters(target_adaptation=True)
         # create optimizer with parameter group
-        optimizer = optim.SGD(params=param_group, lr=self.hparams.args.lr, momentum=self.hparams.args.momentum,
-                              weight_decay=self.hparams.args.weight_decay, nesterov=True)
-        #lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=1, gamma=self.hparams.gamma)
+        if self.hparams.args.optimizer == "sgd":
+            optimizer = optim.SGD(params=param_group, lr=self.hparams.args.lr, momentum=self.hparams.args.momentum,
+                                  weight_decay=self.hparams.args.weight_decay, nesterov=True)
+        elif self.hparams.args.optimizer == "adam":
+            optimizer = optim.Adam(params=param_group, lr=self.hparams.args.lr)
         optimizer = op_copy(optimizer)
         return optimizer
 
@@ -245,15 +255,20 @@ class ClientDataModel(DataModelBase):
         if not self.input_shape:
             self.input_shape = data.shape
         _, predictions = self(data)
-        # logits = nn.Softmax(dim=1)(predictions)
+        _, predict = torch.max(predictions, 1)
+        # update train accuracy
+        self.train_acc(predict, labels.squeeze())
+        # calculate classifier loss
         classifier_loss = CrossEntropyLabelSmooth(num_classes=self.hparams.args.num_classes,
                                                   epsilon=self.hparams.args.epsilon,
                                                   use_gpu=self.device == "cuda")(predictions, labels)
+        # log loss and accuracy
         self.log("classifier_loss", classifier_loss)
+        self.log("train_acc", self.train_acc)
         lr_scheduler(optimizer=self.optimizers(), iter_num=self.trainer.global_step,
                      max_iter=self.trainer.estimated_stepping_batches)
         # return train loss
-        return {'loss': classifier_loss}
+        return {'loss': classifier_loss, 'train_acc': self.train_acc}
 
     def validation_step(self, train_batch, batch_idx):
         data, labels = train_batch
@@ -262,7 +277,7 @@ class ClientDataModel(DataModelBase):
         self.val_acc(predict, labels.squeeze())
         self.log("val_acc", self.val_acc)
         # log validation images
-        if batch_idx % 10:  # Log every 10 batches
+        if batch_idx % LOG_INPUT_IMG_EVERY_N_BATCH:  # Log every N batches
             self.log_tb_images((data, labels, predict), batch_idx)
         # return validation accuracy
         return {'val_acc': self.val_acc}
@@ -270,7 +285,6 @@ class ClientDataModel(DataModelBase):
     def test_step(self, test_batch, batch_idx):
         data, labels = test_batch
         _, predictions = self(data)
-        #logits = nn.Softmax(dim=1)(predictions)
         _, predict = torch.max(predictions, 1)
         self.test_acc(predict, labels.squeeze())
         self.log("test_acc", self.test_acc)

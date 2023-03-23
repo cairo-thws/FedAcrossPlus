@@ -1,14 +1,30 @@
 #client_id: 1
-fast_dev_run: "False"
-net: "resnet34"
-num_workers: 6
-max_epochs: 50
+
+# dataset specific, subdomain determined by client id for now
+dataset: "office31"
 dataset_path: "data/"
+
+# model setup
+net: "resnet34"
+optimizer: "sgd"
+
+# hardware setup
+accelerator: "gpu"
+devices: "1"
+
+# training configuration
+fast_dev_run: "False"
+num_workers: 6
+max_epochs: 100
 batch_size_train: 32
 batch_size_test: 32
 log_every_n_steps: 1
 precision: 16
-accelerator: "gpu"
-devices: "1"
-dataset: "office31"
 check_val_every_n_epoch: 10
+
+# debugging/memory tracking
+#profiler: "pytorch"
+log_gpu_memory: "all"
+#track_grad_norm: "2"
+# requires patch to work on windows, remove dtype conversion in summary.py
+log_parameters: "0"

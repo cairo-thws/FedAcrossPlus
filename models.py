@@ -102,6 +102,8 @@ class ServerDataModel(DataModelBase):
                                                 num_classes=self.hparams.num_classes,
                                                 bottleneck_dim=self.hparams.num_classes)
 
+        # initialize model bottleneck
+        self.model.bottleneck.apply(init_weights)
         # initialize classifier head
         self.model.head.apply(init_weights)
 

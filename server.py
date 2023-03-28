@@ -379,6 +379,11 @@ def main() -> None:
         # evaluation of source prototypes on source test set with centering
         evaluate_server_prototypes(best_source_model, best_source_protos, source_dm, args, dataset_mean)
 
+    if args.pretrain:
+        print("[SERVER]: Pretrain mode enabled, no server boot up")
+        # return and finish script
+        return
+
     # bring source model into server mode and wrap it into LF
     lightning_flower_server_model = LightningFlowerServerModel(model=best_source_model,
                                                                prototypes=best_source_protos,

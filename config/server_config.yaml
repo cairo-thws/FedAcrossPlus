@@ -29,7 +29,8 @@ min_eval_clients: 2
 max_epochs: 300
 log_every_n_steps: 1
 precision: 16
-check_val_every_n_epoch: 1
+check_val_every_n_epoch: 10
+host_address: "localhost:8080"
 
 # debugging/memory tracking
 #profiler: "pytorch"

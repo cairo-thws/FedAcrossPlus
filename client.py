@@ -3,6 +3,7 @@ import os
 import random
 import signal
 import statistics
+
 import torch
 import timeit
 
@@ -166,13 +167,19 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
 
     def prototypes_adaptation(self, adaptation_type=ClientAdaptationType.END_2_END):
         print("[CLIENT " + str(self.c_id) + "] Adapt global prototypes to target samples")
-        if ClientAdaptationType.MEAN_EMBEDDING == adaptation_type:
+        if ClientAdaptationType.NONE == adaptation_type:
             print("[CLIENT " + str(self.c_id) + "] Prototype creation using mean embedding vector of target samples")
+            # move model back on device
+            self.localModel.model = self.localModel.model.to(DEVICE)
             with torch.no_grad():
                 self.localModel.model.eval()
                 protos = []
-                for key in self.loaders[0].keys():
-                    for data, labels in self.loaders[0][key]:
+                for cat in self.episodic_categories:
+                    # idx_subset = train_set.labels_to_idx[i]
+                    idx_subset = [j for j, (_, y) in enumerate(self.loaders[0].dataset) if y == cat]
+                    subset = Subset(self.loaders[0].dataset, idx_subset)
+                    dataloader = DataLoader(subset, batch_size=len(idx_subset))
+                    for data, labels in dataloader:
                         data = data.to(DEVICE)
                         f, _ = self.localModel.model(data)
                         protos.append(torch.mean(f, dim=0))
@@ -261,11 +268,14 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         ret_metrics = dict()
         ret_metrics["duration"] = timeit.default_timer() - fit_begin
         ret_metrics["client_id"] = self.c_id
-        ret_metrics["classifier_loss"] = adaptation_metrics["classifier_loss"].item()
+        if not adaptation_metrics:
+            ret_metrics["classifier_loss"] = 0.0
+        else:
+            ret_metrics["classifier_loss"] = adaptation_metrics["classifier_loss"].item()
 
         return FitRes(status=ret_status,
                       parameters=ret_params,
-                      num_examples=0,
+                      num_examples=self.K * self.N,
                       metrics=ret_metrics)
 
     def evaluate(self, ins: EvaluateIns) -> EvaluateRes:
@@ -313,6 +323,7 @@ def main() -> None:
     parser.add_argument('--config_file', action=ActionConfigFile)
     # parse arguments, skip checks
     args = parser.parse_args(_skip_check=True)
+
     # print args to stdout
     print(common.print_args(args))
 
@@ -333,6 +344,7 @@ def main() -> None:
         dataset = DomainNetDataModule
         num_classes = 345
 
+
     # limit client id number
     client_id = args.client_id % len(dataset.get_domain_names())
     # client ids start with 1, 0 is reserved for server
@@ -346,10 +358,14 @@ def main() -> None:
                        test_transform_fn=get_client_test_augmentation(client_id, normalize=True),
                        shuffle=False)
 
+    # server source domain
+    source_domain_id = args.subdomain_id
+    source_domain = dataset.get_domain_names()[source_domain_id]
     # load pretrained server model
-    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_model.pt")
+    path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(source_domain) + "_model.pt")
     model_file_exists = os.path.exists(path_to_file)
     if model_file_exists:
+        print("[CLIENT] Client " + str(client_id) + " Loading model: " + path_to_file)
         server_model = common.create_empty_server_model(name=str(dataset.get_dataset_name() + "_" + str(domain)),
                                                         num_classes=num_classes,
                                                         lr=Defaults.SERVER_LR,

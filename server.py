@@ -2,6 +2,7 @@ import gc
 import os
 import random
 import signal
+
 import torch
 import statistics
 
@@ -225,6 +226,7 @@ def main() -> None:
     parser.add_argument('--config_file', action=ActionConfigFile)
     # parse arguments, skip checks
     args = parser.parse_args(_skip_check=True)
+
     # print args to stdout
     print(common.print_args(args))
 

@@ -31,8 +31,7 @@ from lightningflower.server import LightningFlowerServer
 from lightningflower.data import LightningFlowerData
 
 # lightningdata wrappers
-from lightningdata import Digit5DataModule, OfficeHomeDataModule, Office31DataModule
-from lightningdata.modules.domain_adaptation.domainNet_datamodule import DomainNetDataModule
+from lightningdata import Digit5DataModule, OfficeHomeDataModule, Office31DataModule, DomainNetDataModule
 
 # project imports
 from torch.utils.data import Subset, DataLoader
@@ -41,6 +40,7 @@ import common
 from strategy import ProtoFewShotPlusStrategy
 from common import add_project_specific_args, signal_handler_free_cuda, Defaults, test_prototypes, NetworkType, LogParameters
 from models import ServerDataModel
+from domainNet_waste_datamodule import DomainNetWasteDataModule
 
 pp = pprint.PrettyPrinter(indent=4)
 
@@ -118,6 +118,9 @@ def create_class_prototypes(model, data_loader: DataLoader):
     # subsets = {target: Subset(train_set, [i for i, (x, y) in enumerate(train_set) if y == target]) for _, target in
     # train_set.class_to_idx.items()}
     print("[MODEL] Creating class prototypes, please wait ...")
+    # empty cuda cache
+    torch.cuda.empty_cache()
+    # start prototype generation
     with torch.no_grad():
         model.eval()
         class_protos = []
@@ -127,6 +130,7 @@ def create_class_prototypes(model, data_loader: DataLoader):
             idx_subset = [j for j, (_, y) in enumerate(data_loader.dataset) if y == i]
             subset = Subset(data_loader.dataset, idx_subset)
             dataloader = DataLoader(subset, batch_size=len(idx_subset))
+            print("Length of subset is " + str(len(idx_subset)))
             for data, labels in dataloader:
                 data = data.to(DEVICE)
                 f, _ = model(data)
@@ -246,6 +250,9 @@ def main() -> None:
     elif args.dataset == DomainNetDataModule.get_dataset_name():
         dataset = DomainNetDataModule
         num_classes = 345
+    elif args.dataset == DomainNetWasteDataModule.get_dataset_name():
+        dataset = DomainNetWasteDataModule
+        num_classes = 30
 
     # the first domain is server source domain
     source_idx = args.subdomain_id
@@ -258,8 +265,9 @@ def main() -> None:
                         test_transform_fn=get_source_test_augmentation(),
                         shuffle=True
                         )
+    source_dm.prepare_data()
+    source_dm.setup()
 
-    best_source_model = None
     path_to_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_model.pt")
     path_to_protos = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_protos.pt")
     path_to_mean_file = os.path.join("data", "pretrained", args.net + "_" + str(dataset.get_dataset_name()) + "_" + str(domain) + "_mean.pt")
@@ -403,7 +411,7 @@ def main() -> None:
     server = LightningFlowerServer(strategy=strategy)
 
     # Server config
-    server_config = ServerConfig(num_rounds=args.num_rounds, round_timeout=5000.0)
+    server_config = ServerConfig(num_rounds=args.num_rounds, round_timeout=99999)
 
     try:
         # Start Lightning Flower server for three rounds of federated learning

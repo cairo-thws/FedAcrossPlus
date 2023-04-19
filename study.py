@@ -5,18 +5,20 @@ from argparse import ArgumentParser
 import torch
 import subprocess
 import time
-from lightningdata import Office31DataModule, OfficeHomeDataModule, Digit5DataModule
-from lightningdata.modules.domain_adaptation.domainNet_datamodule import DomainNetDataModule
+from lightningdata import Office31DataModule, OfficeHomeDataModule, Digit5DataModule, DomainNetDataModule
+
+from domainNet_waste_datamodule import DomainNetWasteDataModule
 
 
-def run_server_pretrain_on_domain(server_idx, dataset, subdir, net):
+def run_server_pretrain_on_domain(server_idx, dataset, subdir, net, N):
     if not os.path.exists(subdir):
         os.makedirs(subdir)
     source_file = os.path.join(subdir, "out_server_pretrain_source_" + dataset.get_domain_names()[server_idx] + ".txt")
     server_log = open(source_file, 'w')
     try:
+        root_dir = subdir.replace(" ", "")
         server_call = "python server.py --config_file=config/server_config.yaml --dataset=" + dataset.get_dataset_name() + " --subdomain_id=" + str(
-            server_idx) + " --pretrain=True --fast_server_startup=False" + " --net=" + net + " --default_root_dir=" + subdir
+            server_idx) + " --pretrain=True --fast_server_startup=False" + " --net=" + net + " --default_root_dir=" + root_dir + " --N=" + str(N)
         print(server_call)
         server_job = subprocess.Popen(server_call.split(), stdout=server_log, stderr=subprocess.STDOUT, shell=False)
         print("Server pretraining, please wait")
@@ -25,17 +27,22 @@ def run_server_pretrain_on_domain(server_idx, dataset, subdir, net):
     except RuntimeError as err:
         print(repr(err))
         torch.cuda.empty_cache()
+
+    torch.cuda.empty_cache()
     server_log.close()
     print("Server pretraining finished")
 
 
-def run_server_client_study(server_idx, client_ids, dataset, subdir, K=5, adaptation_enabled=True, net="resnet34"):
+def run_server_client_study(server_idx, client_ids, dataset, subdir, N=31, K=5, adaptation_enabled=True, net="resnet34"):
     if not os.path.exists(subdir):
         os.makedirs(subdir)
     if adaptation_enabled:
         adaptation = "end_2_end"
     else:
         adaptation = "none"
+
+    # numer of clients to participate in federated training
+    num_clients = str(len(client_ids))
 
     # unique run id
     id = uuid.uuid4()
@@ -44,9 +51,9 @@ def run_server_client_study(server_idx, client_ids, dataset, subdir, K=5, adapta
         source_file = os.path.join(subdir, str(id) + "_out_server_source_" + dataset.get_domain_names()[server_idx] + "_K_" + str(K) +".txt")
         server_log = open(source_file, 'w')
         # start the server
+        root_dir = subdir.replace(" ", "")
         server_call = "python server.py --config_file=config/server_config.yaml --dataset=" + dataset.get_dataset_name() + " --subdomain_id=" + str(
-            server_idx) + " --adaptation_type=" + adaptation + " --net=" + net + " --default_root_dir=" + subdir + " --K=" + str(
-            K)
+            server_idx) + " --adaptation_type=" + adaptation + " --net=" + net + " --default_root_dir=" + root_dir + " --K=" + str(K) + " --N=" + str(N) + " --min_fit_clients=" + num_clients + " --min_available_clients=" + num_clients + " --min_eval_clients=" + num_clients
         print(server_call)
         server_job = subprocess.Popen(server_call.split(), stdout=server_log, stderr=subprocess.STDOUT, shell=False)
         print("Server boot, waiting...")
@@ -58,7 +65,7 @@ def run_server_client_study(server_idx, client_ids, dataset, subdir, K=5, adapta
             # file path
             fp = os.path.join(subdir, str(id) + "_out_client_source_" + dataset.get_domain_names()[server_idx] + "_target_" + dataset.get_domain_names()[client_id] + "_adapt_" + adaptation + "_K_" + str(K) + ".txt")
             log = open(fp, 'w')
-            client_call = "python client.py --config_file=config/client_config.yaml --dataset=" + dataset.get_dataset_name() + " --client_id=" + str(client_id) + " --subdomain_id=" + str(server_idx) + " --net=" + net + " --default_root_dir=" + subdir
+            client_call = "python client.py --config_file=config/client_config.yaml --dataset=" + dataset.get_dataset_name() + " --client_id=" + str(client_id) + " --subdomain_id=" + str(server_idx) + " --net=" + net + " --default_root_dir=" + root_dir
             print(client_call)
             job = subprocess.Popen(client_call.split(), stdout=log, stderr=subprocess.STDOUT, shell=False)
             study_tracker.append((client_id, (log, job)))
@@ -107,19 +114,20 @@ def main():
     elif args.dataset == DomainNetDataModule.get_dataset_name():
         dataset = DomainNetDataModule
         num_classes = 345
-
+    elif args.dataset == DomainNetWasteDataModule.get_dataset_name():
+        dataset = DomainNetWasteDataModule
+        num_classes = 30
 
     # how many subdomains exist
     subdomain_count = len(dataset.get_domain_names())
     # subdomain id list from 0 to subdomain_count
     subdomain_ids = list(range(0, subdomain_count))
-    num_clients = subdomain_count - 1
 
     # parameter K for this study
     K_list = [3, 5, 10]
     folder = os.path.join(args.subdir, dataset.get_dataset_name())
 
-    for server_idx in range(subdomain_count):
+    for server_idx in subdomain_ids:
         # get the full list of available domain ids
         c_ids = subdomain_ids.copy()
         # remove the server id from the list
@@ -136,7 +144,11 @@ def main():
 
         if not os.path.exists(model_filepath):
             # need to do server pretraining:
-            run_server_pretrain_on_domain(server_idx, dataset, run_folder, args.net)
+            run_server_pretrain_on_domain(server_idx=server_idx,
+                                          dataset=dataset,
+                                          subdir=run_folder,
+                                          net=args.net,
+                                          N=num_classes)
             if os.path.exists(model_filepath):
                 print("Pretraining model success")
             else:
@@ -147,6 +159,7 @@ def main():
         run_server_client_study(server_idx,
                                 c_ids,
                                 dataset,
+                                N=num_classes,
                                 K=3, #wont be used without adaptation
                                 subdir=run_folder,
                                 adaptation_enabled=False,
@@ -155,6 +168,7 @@ def main():
             run_server_client_study(server_idx,
                                     c_ids,
                                     dataset,
+                                    N=num_classes,
                                     K=K,
                                     subdir=run_folder,
                                     adaptation_enabled=True)
@@ -163,6 +177,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # clear cache
+    torch.cuda.empty_cache()
     main()
     # clear cache
     torch.cuda.empty_cache()

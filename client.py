@@ -37,6 +37,7 @@ import common
 from common import add_project_specific_args, signal_handler_free_cuda, test_prototypes_on_client, create_reduced_fewshot_loaders, \
     parse_network_type, NetworkType, ClientAdaptationType, Defaults, parse_adaptation_type, LogParameters, print_args
 from models import ClientDataModel
+from domainNet_waste_datamodule import DomainNetWasteDataModule
 
 
 """
@@ -343,7 +344,9 @@ def main() -> None:
     elif args.dataset == DomainNetDataModule.get_dataset_name():
         dataset = DomainNetDataModule
         num_classes = 345
-
+    elif args.dataset == DomainNetWasteDataModule.get_dataset_name():
+        dataset = DomainNetWasteDataModule
+        num_classes = 30
 
     # limit client id number
     client_id = args.client_id % len(dataset.get_domain_names())
@@ -429,8 +432,6 @@ if __name__ == "__main__":
     # clear cuda cache
     torch.cuda.empty_cache()
     print("[CLIENT] Graceful shutdown")
-
-
 
 """
 # client 1 gpu setup

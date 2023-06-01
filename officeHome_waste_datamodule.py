@@ -3,11 +3,11 @@ from typing import Callable, Any
 from lightningdata.common import pre_process as preprocessor
 from lightningdata.modules.domain_adaptation.domainAdaptation_base import DomainAdaptationDataModule
 
-DATASET_NAME = "domainNet_waste"
-AVAILABLE_DOMAINS = ["infograph", "painting", "real", "sketch", "clipart"]
+DATASET_NAME = "officeHome_waste"
+AVAILABLE_DOMAINS = ["Art", "Clipart", "Product", "Real_World"]
 
 
-class DomainNetWasteDataModule(DomainAdaptationDataModule):
+class OfficeHomeWasteDataModule(DomainAdaptationDataModule):
     def __init__(
             self,
             data_dir: str,
@@ -18,7 +18,7 @@ class DomainNetWasteDataModule(DomainAdaptationDataModule):
         super().__init__(root=data_dir, name=DATASET_NAME, domain=domain, *args, **kwargs)
         self.available_domains = AVAILABLE_DOMAINS
         # set remote dataset url
-        self.remoteFolder = "https://drive.google.com/drive/folders/1kWTmSuPjalFbtIsikfxDshgUzDLuREXf"
+        self.remoteFolder = "https://drive.google.com/drive/folders/1lv9JIzBZ9hEvYk5U5gMMjbOU1skIjwRo"
 
     @staticmethod
     def get_domain_names():

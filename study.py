@@ -8,6 +8,7 @@ import time
 from lightningdata import Office31DataModule, OfficeHomeDataModule, Digit5DataModule, DomainNetDataModule
 
 from domainNet_waste_datamodule import DomainNetWasteDataModule
+from officeHome_waste_datamodule import OfficeHomeWasteDataModule
 
 
 def run_server_pretrain_on_domain(server_idx, dataset, subdir, net, N):
@@ -97,6 +98,7 @@ def main():
     parser.add_argument('--net', type=str, default="resnet34")
     parser.add_argument('--subdir', type=str, default="experiment")
     parser.add_argument('--K', type=int, default=5)
+    parser.add_argument('--N', type=int, default=0)
     parser.add_argument('--adapt', type=int, default=1)
 
     # parse arguments, skip checks
@@ -117,6 +119,9 @@ def main():
     elif args.dataset == DomainNetWasteDataModule.get_dataset_name():
         dataset = DomainNetWasteDataModule
         num_classes = 30
+    elif args.dataset == OfficeHomeWasteDataModule.get_dataset_name():
+        dataset = OfficeHomeWasteDataModule
+        num_classes = 25
 
     # how many subdomains exist
     subdomain_count = len(dataset.get_domain_names())
@@ -155,11 +160,16 @@ def main():
                 print("Pretraining model failure, skipping client adaptation")
                 continue
 
+        if args.N == 0:
+            N = num_classes
+        else:
+            N = args.N
+
         # no adaptation run
         run_server_client_study(server_idx,
                                 c_ids,
                                 dataset,
-                                N=num_classes,
+                                N=N,
                                 K=3, #wont be used without adaptation
                                 subdir=run_folder,
                                 adaptation_enabled=False,
@@ -168,10 +178,11 @@ def main():
             run_server_client_study(server_idx,
                                     c_ids,
                                     dataset,
-                                    N=num_classes,
+                                    N=N,
                                     K=K,
                                     subdir=run_folder,
-                                    adaptation_enabled=True)
+                                    adaptation_enabled=True,
+                                    net=args.net)
 
     print("Finished study")
 

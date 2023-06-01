@@ -41,6 +41,7 @@ from strategy import ProtoFewShotPlusStrategy
 from common import add_project_specific_args, signal_handler_free_cuda, Defaults, test_prototypes, NetworkType, LogParameters
 from models import ServerDataModel
 from domainNet_waste_datamodule import DomainNetWasteDataModule
+from officeHome_waste_datamodule import OfficeHomeWasteDataModule
 
 pp = pprint.PrettyPrinter(indent=4)
 
@@ -253,6 +254,9 @@ def main() -> None:
     elif args.dataset == DomainNetWasteDataModule.get_dataset_name():
         dataset = DomainNetWasteDataModule
         num_classes = 30
+    elif args.dataset == OfficeHomeWasteDataModule.get_dataset_name():
+        dataset = OfficeHomeWasteDataModule
+        num_classes = 25
 
     # the first domain is server source domain
     source_idx = args.subdomain_id

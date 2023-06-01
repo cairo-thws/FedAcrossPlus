@@ -87,6 +87,8 @@ class ServerDataModel(DataModelBase):
         self.save_hyperparameters()
 
         # fetch backbone as base network
+        if net == "resnet101":
+            backbone = backbones.resnet101(pretrained=pretrain)
         if net == "resnet50":
             backbone = backbones.resnet50(pretrained=pretrain)
         elif net == "resnet34":

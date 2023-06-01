@@ -65,11 +65,11 @@ def plot_prototypes(prototypes, labels, class_features=None, dataset_mean=None):
         hue="label",
         palette=sns.color_palette("hls", nr_classes),
         data=df_labels,
-        legend=True,
+        legend=False,
         alpha=0.5,
         # from http://mirrors.ibiblio.org/CTAN/fonts/stix/doc/stix.pdf
         marker='o',
-        s=30)
+        s=350)
 
     # scatterplot of prototypes projected into the embedding space
     sns.scatterplot(
@@ -79,33 +79,38 @@ def plot_prototypes(prototypes, labels, class_features=None, dataset_mean=None):
         c="red",
         data=df_protos,
         legend=False,
-        alpha=0.5,
+        alpha=1.0,
         # from http://mirrors.ibiblio.org/CTAN/fonts/stix/doc/stix.pdf
         marker='v',
-        s=75)
+        s=400)
     lim = (transformed_data.min() - 0.1, transformed_data.max() + 0.1)
     ax.set_xlim(lim)
     ax.set_ylim(lim)
     ax.set_aspect('equal')
 
-    plt.title("t-SNE Results")
+    plt.title("")
+    plt.xlabel("")
+    plt.ylabel("")
     plt.tight_layout()
+    fig = plt.gcf()
+    fig.savefig("data/plot/out/tuned.png")
     #plt.xlabel("Dimension 1")
     plt.show()
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GENERATE = True
+GENERATE = False
 NORMALIZE = True
 USE_PRETRAIN = False
-NET = "resnet34"
-PATH_TO_PLOTS = os.path.join("data", "plot", "pretrain") if USE_PRETRAIN else os.path.join("data", "plot", "not_pretrained")
+NET = "resnet50"
+#PATH_TO_PLOTS = os.path.join("data", "plot", "pretrain") if USE_PRETRAIN else os.path.join("data", "plot", "not_pretrained")
+PATH_TO_PLOTS = os.path.join("data", "plot", "tuned")
 DATASET = "office31"
-SOURCE_SUBDOMAIN_ID = "0"
-TARGET_SUBDOMAIN_ID = "1"
+SOURCE_SUBDOMAIN_ID = "amazon"
+TARGET_SUBDOMAIN_ID = "webcam"
 FILE_ENDING = ".pt"
-SOURCE_FILE_NAME = NET + "_" + DATASET + "_" + SOURCE_SUBDOMAIN_ID
-TARGET_FILE_NAME = NET + "_" + DATASET + "_" + TARGET_SUBDOMAIN_ID
+SOURCE_FILE_NAME = NET + "_" + DATASET + "_" + SOURCE_SUBDOMAIN_ID + "_model"
+TARGET_FILE_NAME = NET + "_" + DATASET + "_" + TARGET_SUBDOMAIN_ID + "_model"
 MODEL_PATH = os.path.join("data", "pretrained", SOURCE_FILE_NAME + FILE_ENDING) if USE_PRETRAIN else os.path.join("data", "not_pretrained", SOURCE_FILE_NAME + FILE_ENDING)
 
 
@@ -117,7 +122,7 @@ def main() -> None:
     # the dataset under testing
     dataset = Office31DataModule
     # the subdomain to extract features and prototypes from
-    domain = dataset.get_domain_names()[int(TARGET_SUBDOMAIN_ID)]
+    domain = TARGET_SUBDOMAIN_ID
     source_dm = dataset(data_dir="data",
                         domain=domain,
                         batch_size=32,
@@ -135,10 +140,13 @@ def main() -> None:
                                                  weight_decay=Defaults.SERVER_LR_WD,
                                                  epsilon=Defaults.SERVER_LOSS_EPSILON,
                                                  net=NET,
-                                                 pretrain=False)
-        server_model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+                                                 pretrain=False if USE_PRETRAIN else True,
+                                                 optimizer="sgd")
+        if USE_PRETRAIN:
+            server_model.load_state_dict(torch.load("data/pretrained/resnet50_office31_amazon_model_webcam_k_10.pt", map_location=DEVICE))
+            #server_model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
         pretrained_model = server_model.model  # .to(DEVICE)
-        client_data_model = ClientDataModel(pretrained_model=pretrained_model)
+        client_data_model = ClientDataModel(server_model.hparams_initial, pretrained_model=pretrained_model)
         client_data_model = client_data_model.to(DEVICE)
         model = client_data_model.model
 
@@ -189,7 +197,6 @@ def main() -> None:
         class_prototypes = torch.load(os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_protos.pt"))
         class_features = torch.load(os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_class_features.pt"))
         dataset_mean = torch.load(os.path.join(PATH_TO_PLOTS, TARGET_FILE_NAME + "_dataset_mean.pt"))
-
 
     #labels = random.sample(range(31), 5)
     labels = list([1, 2, 3, 4, 5])

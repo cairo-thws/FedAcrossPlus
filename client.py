@@ -38,6 +38,7 @@ from common import add_project_specific_args, signal_handler_free_cuda, test_pro
     parse_network_type, NetworkType, ClientAdaptationType, Defaults, parse_adaptation_type, LogParameters, print_args
 from models import ClientDataModel
 from domainNet_waste_datamodule import DomainNetWasteDataModule
+from officeHome_waste_datamodule import OfficeHomeWasteDataModule
 
 
 """
@@ -147,6 +148,12 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
     def finetune_model(self, trainer, train_loader, val_loader=None, create_prototypes=True):
         # start training with limited examples
         trainer.fit(self.localModel.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+        # obtain the best model from checkpoint
+        #best_model_pl = ClientDataModel.load_from_checkpoint(cb.best_model_path, map_location=DEVICE)
+        torch.save(self.localModel.model.state_dict(), "data/pretrained/resnet50_office31_amazon_model_webcam_k_10.pt")
+        print("Created webcam model - finished")
+
         if create_prototypes:
             # move model back on device
             self.localModel.model = self.localModel.model.to(DEVICE)
@@ -347,6 +354,9 @@ def main() -> None:
     elif args.dataset == DomainNetWasteDataModule.get_dataset_name():
         dataset = DomainNetWasteDataModule
         num_classes = 30
+    elif args.dataset == OfficeHomeWasteDataModule.get_dataset_name():
+        dataset = OfficeHomeWasteDataModule
+        num_classes = 25
 
     # limit client id number
     client_id = args.client_id % len(dataset.get_domain_names())

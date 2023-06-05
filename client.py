@@ -1,3 +1,26 @@
+"""
+MIT License
+
+Copyright (c) 2023 Manuel Roeder
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
 import gc
 import os
 import random
@@ -57,7 +80,7 @@ Capture KB interrupt and free cuda memory
 signal.signal(signal.SIGINT, signal_handler_free_cuda)
 
 
-class ProtoFewShotPlusClient(LightningFlowerClient):
+class FedAcrossClient(LightningFlowerClient):
     def __init__(self,
                  model,
                  trainer_args,
@@ -89,7 +112,7 @@ class ProtoFewShotPlusClient(LightningFlowerClient):
         # track the number of federated fit rounds
         self.fed_round_fit = 0
 
-        print("[CLIENT " + str(self.c_id) + "] Init ProtoFewShotPlusClient with id" + str(c_id))
+        print("[CLIENT " + str(self.c_id) + "] Init FedAcrossClient with id" + str(c_id))
 
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
         print("[CLIENT " + str(self.c_id) + "] Get params")
@@ -413,7 +436,7 @@ def main() -> None:
         # start flwr client
         try:
             start_client(server_address=args.host_address,
-                         client=ProtoFewShotPlusClient(model=client_model,
+                         client=FedAcrossClient(model=client_model,
                                                        trainer_args=args,
                                                        datamodule=dm_train,
                                                        c_id=args.client_id),

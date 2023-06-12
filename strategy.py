@@ -142,7 +142,7 @@ class FedAcrossStrategy(LightningFlowerBaseStrategy, FedAvg):
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
-        """Aggregate fit results using weighted average."""
+        """Aggregate fit results using aggregation strategy from upstreaming"""
         print("[STRATEGY] Aggregate_fit called")
         if not results:
             return None, {}

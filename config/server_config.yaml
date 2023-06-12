@@ -11,15 +11,15 @@ net: "resnet34"
 adaptation_type: "end_2_end"
 optimizer: "sgd"
 
-# hardware
-accelerator: "gpu"
+# hardware - change to gpu/cpu if required
+accelerator: "cpu"
 devices: "1"
 
 # federated training configuration
-pretrain: "False"
+pretrain: "True"
 fast_dev_run: "False"
 fast_server_startup: "True"
-num_workers: 8
+num_workers: 4
 batch_size_train: 128
 batch_size_test: 64
 num_rounds: 1

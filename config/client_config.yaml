@@ -9,8 +9,8 @@ dataset_path: "data/"
 net: "resnet34"
 optimizer: "sgd"
 
-# hardware setup
-accelerator: "gpu"
+# hardware - change to gpu/cpu if required
+accelerator: "cpu"
 devices: "1"
 
 # training configuration
@@ -25,6 +25,7 @@ check_val_every_n_epoch: 5
 
 # federated learning config
 host_address: "localhost:8080"
+upstream: "False"
 
 # debugging/memory tracking
 #profiler: "pytorch"

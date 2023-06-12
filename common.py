@@ -85,6 +85,7 @@ def add_project_specific_args(parent_parser):
     parser = parent_parser.add_argument_group("FedAcross")
     parser.add_argument("--net", type=str, default="resnet50")
     parser.add_argument("--pretrain", type=boolean_string, default=False)
+    parser.add_argument("--upstream", type=boolean_string, default=False)
     parser.add_argument("--optimizer", type=str, default="sgd")
     parser.add_argument("--ckpt_path", type=str, default="")
     parser.add_argument("--fast_server_startup", default=False, type=boolean_string)

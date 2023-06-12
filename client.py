@@ -112,6 +112,11 @@ class FedAcrossClient(LightningFlowerClient):
         # track the number of federated fit rounds
         self.fed_round_fit = 0
 
+        # upstream flag
+        self.upstream = False
+        if trainer_args.upstream:
+            self.upstream = trainer_args.upstream
+
         print("[CLIENT " + str(self.c_id) + "] Init FedAcrossClient with id" + str(c_id))
 
     def get_parameters(self, ins: GetParametersIns) -> GetParametersRes:
@@ -303,6 +308,10 @@ class FedAcrossClient(LightningFlowerClient):
             ret_metrics["classifier_loss"] = 0.0
         else:
             ret_metrics["classifier_loss"] = adaptation_metrics["classifier_loss"].item()
+
+        if self.upstream:
+            # Upstream parameters of your model
+            print("[CLIENT " + str(self.c_id) + "] Upstream learned parameters")
 
         return FitRes(status=ret_status,
                       parameters=ret_params,

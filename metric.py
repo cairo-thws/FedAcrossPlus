@@ -1,7 +1,7 @@
 """
 MIT License
 
-Copyright (c) 2023 Manuel Roeder
+Copyright (c) 2024 Manuel Roeder
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

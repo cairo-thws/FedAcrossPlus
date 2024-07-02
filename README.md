@@ -1,7 +1,7 @@
 ﻿
-# [FedAcross+] Bridging Domain Gaps with Federated Few-Shot Adaptation in Dynamic Data Regimes
+# [FedAcross+] Domain Borders Are There to Be Crossed With Federated Few-Shot Adaptation
 
-This respository is an implementation of the algorithm proposed in the paper "Bridging Domain Gaps with Federated Few-Shot Adaptation in Dynamic Data Regimes".
+This respository is an implementation of the algorithm proposed in the paper "Domain Borders Are There to Be Crossed With Federated Few-Shot Adaptation".
 Please note that the code for the streaming extension is currently in integration and not publicly available.
 
 This code was built on [M. Roeder's FedAcross repository](https://github.com/cairo-thws/FedAcross).
